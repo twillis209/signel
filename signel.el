@@ -939,6 +939,72 @@ Returns nil if ID is a phone number (+) or UUID (contains -)."
   (not (or (string-prefix-p "+" id)
            (string-match-p "-" id))))
 
+;;; Send status
+
+(defun signel--send-failures (result)
+  "Return one \"NUMBER-OR-UUID: TYPE\" string per failed entry in RESULT.
+RESULT is a signal-cli \"send\" result; entries whose type is not
+\"SUCCESS\" count as failures."
+  (let (failures)
+    (dolist (entry (append (alist-get 'results result) nil))
+      (let ((type (alist-get 'type entry))
+            (addr (alist-get 'recipientAddress entry)))
+        (unless (equal type "SUCCESS")
+          (push (format "%s: %s"
+                        (or (alist-get 'number addr) (alist-get 'uuid addr) "?")
+                        type)
+                failures))))
+    (nreverse failures)))
+
+(defun signel--set-send-status (buffer marker status-id text face)
+  "In BUFFER, replace the send status STATUS-ID found after MARKER.
+Replace it with TEXT in FACE, or just remove it if TEXT is nil.  Do
+nothing if BUFFER is dead or the status can't be found."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (signel--with-prompt-preserved
+        (let ((beg (text-property-any (or marker (point-min)) (point-max)
+                                      'signel-send-status status-id)))
+          (when beg
+            (let ((end (next-single-property-change
+                        beg 'signel-send-status nil (point-max))))
+              (delete-region beg end)
+              (goto-char beg)
+              (when text
+                (insert (propertize text 'face face
+                                    'signel-send-status status-id))))))))))
+
+(defun signel--send-with-status (params text)
+  "Send PARAMS as a \"send\" request and echo TEXT as the owner's message.
+The echo line ends with a status that is cleared on success and replaced
+with the failure on partial delivery failure or an RPC error."
+  (let* ((buffer (current-buffer))
+         (status-id (gensym "send"))
+         (marker nil)
+         (update (lambda (text face)
+                   (signel--set-send-status buffer marker status-id text face))))
+    ;; No target buffer: the failure is shown on the message line, not as a
+    ;; separate system message.
+    (signel--send-rpc
+     "send" params nil
+     (lambda (result err)
+       (let ((failures (and (not err) (signel--send-failures result))))
+         (cond
+          (err (funcall update (format " (failed: %s)" (alist-get 'message err))
+                        'signel-error-face))
+          (failures
+           (funcall update (format " (not delivered to: %s)"
+                                   (string-join failures ", "))
+                    'signel-error-face))
+          (t (funcall update nil nil))))))
+    (setq marker (signel--insert-msg signel--chat-id "Me" text nil nil t))
+    (signel--with-prompt-preserved
+      ;; The message's own newline is just before the prompt line.
+      (goto-char (point-max))
+      (when (eq (char-before) ?\n) (backward-char))
+      (insert (propertize " (sending…)" 'face 'signel-timestamp-face
+                          'signel-send-status status-id)))))
+
 (defun signel--send-input ()
   "Send the input from the prompt to the current chat."
   (interactive)
@@ -954,9 +1020,7 @@ Returns nil if ID is a phone number (+) or UUID (contains -)."
         (if is-group
             (push `(groupId . ,signel--chat-id) params)
           (push `(recipient . [,signel--chat-id]) params))
-        (signel--send-rpc "send" params (current-buffer)))
-
-      (signel--insert-msg signel--chat-id "Me" text nil nil t))))
+        (signel--send-with-status params text)))))
 
 ;;;###autoload
 (defun signel-attach-file (file-path)
@@ -970,10 +1034,8 @@ Returns nil if ID is a phone number (+) or UUID (contains -)."
     (if is-group
         (push `(groupId . ,signel--chat-id) params)
       (push `(recipient . [,signel--chat-id]) params))
-    (signel--send-rpc "send" params (current-buffer))
-    (signel--insert-msg signel--chat-id "Me"
-                        (format "[Sending: %s]" (file-name-nondirectory full-path))
-                        nil nil t)))
+    (signel--send-with-status
+     params (format "[Sending: %s]" (file-name-nondirectory full-path)))))
 
 ;;;###autoload
 (defun signel-chat (recipient)

@@ -123,6 +123,70 @@ Return the list of (RESULT ERROR) callback invocations."
     (should-not (car (car calls)))
     (should (cadr (car calls)))))
 
+;;; Task 8: send status
+
+(ert-deftest signel-send-failures-parses-results ()
+  (should (equal (signel--send-failures
+                  '((timestamp . 1)
+                    (results . [((recipientAddress (uuid . "u1") (number . "+441")) (type . "SUCCESS"))
+                                ((recipientAddress (uuid . "u2") (number . nil)) (type . "UNREGISTERED_FAILURE"))])))
+                 '("u2: UNREGISTERED_FAILURE"))))
+
+(defmacro signel-test--with-send (&rest body)
+  "Run BODY in a chat buffer with RPC stubbed; request id 1 is the send."
+  (declare (indent 0) (debug t))
+  `(let ((signel--rpc-callbacks (make-hash-table :test 'equal))
+         (signel--request-buffer-map (make-hash-table :test 'equal))
+         (signel--rpc-id-counter 0))
+     (cl-letf (((symbol-function 'get-process) (lambda (_) t))
+               ((symbol-function 'process-send-string) #'ignore))
+       (signel-test-with-chat "+15550008" ,@body))))
+
+(defun signel-test--type-and-send (text)
+  (goto-char (point-max))
+  (insert "draft")
+  (delete-region signel--input-marker (point-max))
+  (insert text)
+  (signel--send-input))
+
+(ert-deftest signel-send-shows-pending-then-clears ()
+  (signel-test--with-send
+    (signel-test--type-and-send "hello")
+    (should (string-match-p "<Me> hello (sending…)\n" (buffer-string)))
+    (signel--dispatch '((id . 1) (result . ((timestamp . 1)
+                                            (results . [((recipientAddress (number . "+1")) (type . "SUCCESS"))])))))
+    (should (string-match-p "<Me> hello\n" (buffer-string)))
+    (should-not (string-match-p "sending" (buffer-string)))))
+
+(ert-deftest signel-send-shows-partial-failure ()
+  (signel-test--with-send
+    (signel-test--type-and-send "hello")
+    (signel--dispatch '((id . 1) (result . ((results . [((recipientAddress (uuid . "u2")) (type . "NETWORK_FAILURE"))])))))
+    (should (string-match-p "hello (not delivered to: u2: NETWORK_FAILURE)\n" (buffer-string)))
+    (should-not (string-match-p "ERROR" (buffer-string)))))
+
+(ert-deftest signel-send-shows-rpc-error-once ()
+  (signel-test--with-send
+    (signel-test--type-and-send "hello")
+    (signel--dispatch '((id . 1) (error . ((message . "boom")))))
+    (should (string-match-p "hello (failed: boom)\n" (buffer-string)))
+    (should-not (string-match-p "\\*\\*\\* ERROR" (buffer-string)))))
+
+(ert-deftest signel-send-status-survives-later-message ()
+  (signel-test--with-send
+    (signel-test--type-and-send "first")
+    (signel--insert-msg "+15550008" "Bob" "incoming" nil nil nil)
+    (insert "typing")
+    (signel--dispatch '((id . 1) (result . ((results . [((recipientAddress (uuid . "u2")) (type . "X"))])))))
+    (should (string-match-p "first (not delivered to: u2: X)\n.*<Bob> incoming\n" (buffer-string)))
+    (should (string-suffix-p "typing" (buffer-string)))))
+
+(ert-deftest signel-send-status-ignores-killed-buffer ()
+  (signel-test--with-send
+    (signel-test--type-and-send "hello")
+    (let ((kill-buffer-query-functions nil)) (kill-buffer (current-buffer))))
+  (signel--dispatch '((id . 1) (result . ((results . []))))))
+
 (provide 'signel-test)
 ;;; signel-test.el ends here
 
