@@ -45,6 +45,7 @@
 
 (require 'json)
 (require 'cl-lib)
+(require 'subr-x)
 (require 'notifications)
 (require 'button)
 (require 'image)
@@ -132,8 +133,40 @@ paths never reach the log.  `data:' URIs are always shortened."
 (defvar signel--rpc-callbacks (make-hash-table :test 'equal)
   "Mapping of RPC ID to a function called with (RESULT ERROR) on reply.")
 
-(defvar signel--contact-map (make-hash-table :test 'equal)
-  "Cache of phone numbers to display names.")
+(defvar signel--profile-names (make-hash-table :test 'equal)
+  "Sanitised sender-chosen profile names, keyed by number and by UUID.
+These are untrusted; see `signel--display-name'.")
+
+(defvar signel--contacts (make-hash-table :test 'equal)
+  "Address-book entries keyed by both number and UUID.
+Each value is a plist (:name STRING :blocked BOOL).")
+
+(defun signel--sanitize-name (string)
+  "Return STRING without control or bidi characters, trimmed, or \"?\"."
+  (let* ((clean (replace-regexp-in-string
+                 "[[:cntrl:]\u0080-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+                 "" (if (stringp string) string "")))
+         (trimmed (string-trim clean)))
+    (if (string-empty-p trimmed) "?" trimmed)))
+
+(defun signel--mode-line-escape (string)
+  "Escape `%' in STRING for use in the mode line."
+  (replace-regexp-in-string "%" "%%" string t t))
+
+(defun signel--display-name (number uuid profile-name group-p)
+  "Return a trustworthy label for a sender.
+Use the address-book name for NUMBER or UUID if there is one (plus
+the number when GROUP-P).  Otherwise show the sanitised PROFILE-NAME
+with NUMBER, or the first 8 characters of UUID when there is no number."
+  (let* ((entry (or (and number (gethash number signel--contacts))
+                    (and uuid (gethash uuid signel--contacts))))
+         (name (plist-get entry :name)))
+    (if (and (stringp name) (not (string-empty-p name)))
+        (if (and group-p number) (format "%s (%s)" name number) name)
+      (format "%s (%s)" (signel--sanitize-name profile-name)
+              (cond (number number)
+                    (uuid (substring uuid 0 (min 8 (length uuid))))
+                    (t "?"))))))
 
 (defvar signel--active-chats (make-hash-table :test 'equal)
   "Set of currently active chat IDs.")
@@ -334,16 +367,27 @@ Output is split into lines first; a line longer than
   "Handle new messages, attachments, stickers, and sync events from PARAMS."
   (let* ((envelope (alist-get 'envelope params))
          (source (or (alist-get 'sourceNumber envelope) (alist-get 'source envelope)))
+         (source-uuid (alist-get 'sourceUuid envelope))
+         (source-number (or (alist-get 'sourceNumber envelope)
+                            (and (stringp source) (string-prefix-p "+" source) source)))
          (source-name (alist-get 'sourceName envelope))
          (data (alist-get 'dataMessage envelope))
          (sync (alist-get 'syncMessage envelope))
          (typing (alist-get 'typingMessage envelope))
          (group-info (alist-get 'groupInfo data)))
 
-    (when (and source source-name)
-      (puthash source source-name signel--contact-map))
+    (when source-name
+      (let ((clean (signel--sanitize-name source-name)))
+        (when source-number (puthash source-number clean signel--profile-names))
+        (when source-uuid (puthash source-uuid clean signel--profile-names))))
 
-    (let ((chat-id (if group-info (alist-get 'groupId group-info) source)))
+    (let* ((chat-id (if group-info (alist-get 'groupId group-info) source))
+           (sender-label (signel--display-name
+                          source-number source-uuid
+                          (or source-name
+                              (gethash source-number signel--profile-names)
+                              (gethash source-uuid signel--profile-names))
+                          (and group-info t))))
       (when chat-id
         (puthash chat-id t signel--active-chats)
         (signel--dashboard-refresh)
@@ -353,7 +397,7 @@ Output is split into lines first; a line longer than
           (let ((msg-text (alist-get 'message data))
                 (attachments (alist-get 'attachments data))
                 (sticker (alist-get 'sticker data))
-                (sender (or source-name source)))
+                (sender sender-label))
 
             (when (or msg-text attachments sticker)
               (signel--insert-msg chat-id sender msg-text attachments sticker nil)
@@ -380,9 +424,14 @@ Output is split into lines first; a line longer than
               (signel--insert-msg dest "Me" msg-text attachments sticker t))))
 
         ;; 3. Typing
-        (when (and typing (string= "STARTED" (alist-get 'action typing)))
-          (with-current-buffer (signel--get-buffer chat-id)
-            (setq mode-line-process (format " [%s...]" (or source-name source)))))))))
+        (when typing
+          (let ((action (alist-get 'action typing)))
+            (when (member action '("STARTED" "STOPPED"))
+              (with-current-buffer (signel--get-buffer chat-id)
+                (setq mode-line-process
+                      (and (string= action "STARTED")
+                           (format " [%s...]" (signel--mode-line-escape sender-label))))
+                (force-mode-line-update)))))))))
 
 ;;; Media & Stickers
 
@@ -684,8 +733,14 @@ Returns nil if ID is a phone number (+) or UUID (contains -)."
     (insert "Active Chats:\n")
     (insert "-------------\n")
     (maphash (lambda (id _)
-               (let ((name (gethash id signel--contact-map id)))
-                 (insert-button (format "%s (%s)" name id)
+               (let ((label (if (or (string-prefix-p "+" id)
+                                    (string-match-p "\\`[0-9a-fA-F]\\{8\\}-" id))
+                                (signel--display-name
+                                 (and (string-prefix-p "+" id) id)
+                                 (and (not (string-prefix-p "+" id)) id)
+                                 (gethash id signel--profile-names) nil)
+                              (format "%s (%s)" id id))))
+                 (insert-button label
                                 'action #'signel--dashboard-open-entry
                                 'signel-id id
                                 'follow-link t)

@@ -125,3 +125,46 @@ Return the list of (RESULT ERROR) callback invocations."
 
 (provide 'signel-test)
 ;;; signel-test.el ends here
+
+;;; Task 3: sanitising and sender identity
+
+(ert-deftest signel-sanitize-strips-controls-and-bidi ()
+  (should (equal (signel--sanitize-name "Ali\ne‮fdp.exe") "Aliefdp.exe")))
+(ert-deftest signel-sanitize-keeps-unicode ()
+  (should (equal (signel--sanitize-name "Zoë 🚣 Ἀθηνᾶ") "Zoë 🚣 Ἀθηνᾶ")))
+(ert-deftest signel-sanitize-empty-gives-question-mark ()
+  (should (equal (signel--sanitize-name nil) "?"))
+  (should (equal (signel--sanitize-name " \t‏ ") "?")))
+(ert-deftest signel-display-name-contact-wins ()
+  (let ((signel--contacts (make-hash-table :test 'equal)))
+    (puthash "+441" '(:name "Mum" :blocked nil) signel--contacts)
+    (should (equal (signel--display-name "+441" nil "Totally Mum" nil) "Mum"))
+    (should (equal (signel--display-name "+441" nil "Totally Mum" t) "Mum (+441)"))))
+(ert-deftest signel-display-name-stranger-shows-number ()
+  (let ((signel--contacts (make-hash-table :test 'equal)))
+    (should (equal (signel--display-name "+449" nil "Mum" nil) "Mum (+449)"))
+    (should (equal (signel--display-name nil "abcdef12-3456" "Mum" nil) "Mum (abcdef12)"))))
+(ert-deftest signel-mode-line-escape ()
+  (should (equal (signel--mode-line-escape "100%-") "100%%-")))
+(ert-deftest signel-receive-labels-stranger-with-number-and-escapes-typing ()
+  (let ((signel--contacts (make-hash-table :test 'equal))
+        (signel--profile-names (make-hash-table :test 'equal))
+        (signel--active-chats (make-hash-table :test 'equal)))
+    (signel-test-with-chat "+449"
+      (cl-letf (((symbol-function 'notifications-notify) #'ignore)
+                ((symbol-function 'signel--dashboard-refresh) #'ignore)
+                ((symbol-function 'display-buffer) #'ignore))
+        (signel--handle-receive
+         '((envelope . ((sourceNumber . "+449") (sourceUuid . "abcdef12-3456")
+                        (sourceName . "100%‮Mum")
+                        (dataMessage . ((message . "hi")))))))
+        (should (string-match-p "100%Mum (\\+449)" (buffer-string)))
+        (signel--handle-receive
+         '((envelope . ((sourceNumber . "+449") (sourceName . "100%")
+                        (typingMessage . ((action . "STARTED")))))))
+        (should (equal mode-line-process " [100%% (+449)...]"))
+        (signel--handle-receive
+         '((envelope . ((sourceNumber . "+449")
+                        (typingMessage . ((action . "STOPPED")))))))
+        (should (null mode-line-process))
+        (should (equal (gethash "abcdef12-3456" signel--profile-names) "100%Mum"))))))
