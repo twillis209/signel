@@ -272,13 +272,10 @@ Return the list of (RESULT ERROR) callback invocations."
 
 (ert-deftest signel-insert-msg-survives-bad-attachment ()
   (signel-test-with-chat "+441"
-    (let ((file (make-temp-file "signel-att")))
-      (unwind-protect
-          ;; Existing file with a non-string contentType makes `string-prefix-p' signal.
-          (signel--insert-msg "+441" "X" "hi"
-                              (vector `((id . "a") (storedFilename . ,file) (contentType . 5)))
-                              nil nil)
-        (delete-file file)))
+    ;; A non-string storedFilename makes `file-exists-p' signal.
+    (signel--insert-msg "+441" "X" "hi"
+                        (vector '((id . "a") (storedFilename . 5) (contentType . "image/png")))
+                        nil nil)
     (should (string-match-p "Couldn't display attachment" (buffer-string)))
     (should (string-match-p "hi" (buffer-string)))
     (should (string-suffix-p signel-prompt
@@ -351,3 +348,274 @@ Return the list of (RESULT ERROR) callback invocations."
       (should (string-match-p "<X>" s))
       (should (string-match-p "<Y> second" s))
       (should (string-suffix-p (concat "\n" signel-prompt) s)))))
+
+;;; Task 6: image policy, stickers and animation
+
+(defun signel-test--fixture (bytes &optional suffix)
+  "Write BYTES unconverted to a new temp file with SUFFIX; return its name."
+  (let ((file (make-temp-file "signel-img" nil suffix))
+        (coding-system-for-write 'no-conversion))
+    (write-region bytes nil file nil 'silent)
+    file))
+
+(defconst signel-test--png "\x89PNG\r\n\x1a\n")
+(defconst signel-test--gif "GIF89a")
+(defconst signel-test--jpeg "\xff\xd8\xff")
+(defconst signel-test--webp "RIFF\0\0\0\0WEBPVP8 ")
+(defconst signel-test--svg "<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
+
+(defmacro signel-test--with-image-stubs (calls &rest body)
+  "Run BODY with image decoding stubbed; record calls in CALLS.
+Each entry is (FUNCTION . ARGS), most recent first."
+  (declare (indent 1))
+  `(let ((,calls nil))
+     (cl-letf (((symbol-function 'create-image)
+                (lambda (&rest args) (push (cons 'create-image args) ,calls)
+                  (list 'image :type (nth 1 args))))
+               ((symbol-function 'insert-image)
+                (lambda (&rest args) (push (cons 'insert-image args) ,calls)
+                  (insert "<IMG>")))
+               ((symbol-function 'image-multi-frame-p)
+                (lambda (&rest args) (push (cons 'image-multi-frame-p args) ,calls) t))
+               ((symbol-function 'image-size)
+                (lambda (&rest args) (push (cons 'image-size args) ,calls) '(1 . 1)))
+               ((symbol-function 'image-animate)
+                (lambda (&rest args) (push (cons 'image-animate args) ,calls)))
+               ((symbol-function 'signel--convert-apng-to-gif)
+                (lambda (&rest args) (push (cons 'convert args) ,calls) nil)))
+       ,@body)))
+
+(defun signel-test--called (calls fn)
+  "Return the entries in CALLS for FN."
+  (seq-filter (lambda (c) (eq (car c) fn)) calls))
+
+(ert-deftest signel-image-action-table ()
+  (let ((signel-auto-display-images t))
+    (should (eq (signel--image-action 'png t nil) 'inline))
+    (should (eq (signel--image-action 'jpeg t nil) 'inline))
+    (should (eq (signel--image-action 'gif t nil) 'inline))
+    (should (eq (signel--image-action 'svg t nil) 'button))
+    (should (eq (signel--image-action 'webp t nil) 'button))   ; WebP attachment from contact
+    (should (eq (signel--image-action 'webp t t) 'inline))      ; WebP sticker from contact
+    (should (eq (signel--image-action 'png nil nil) 'button))   ; stranger
+    (should (eq (signel--image-action 'webp nil t) 'button))
+    (should (eq (signel--image-action nil t nil) 'file)))
+  (let ((signel-auto-display-images nil))
+    (should (eq (signel--image-action 'png t nil) 'button))
+    (should (eq (signel--image-action 'webp t t) 'button))
+    (should (eq (signel--image-action nil t nil) 'file))))
+
+(ert-deftest signel-sniff-ignores-mime ()
+  (let ((files (list (cons (signel-test--fixture signel-test--svg ".png") 'svg)
+                     (cons (signel-test--fixture signel-test--png ".svg") 'png)
+                     (cons (signel-test--fixture signel-test--gif ".jpg") 'gif)
+                     (cons (signel-test--fixture signel-test--jpeg ".gif") 'jpeg)
+                     (cons (signel-test--fixture signel-test--webp ".png") 'webp)
+                     (cons (signel-test--fixture "hello, world\n" ".png") nil))))
+    (unwind-protect
+        (dolist (f files)
+          (should (eq (signel--sniff-image-type (car f)) (cdr f))))
+      (dolist (f files) (delete-file (car f))))
+    (should-not (signel--sniff-image-type "/nonexistent/signel/x.png"))))
+
+(defun signel-test--receive-image (group-id source bytes &optional sticker)
+  "Receive a group message from SOURCE with an attachment of BYTES.
+With STICKER non-nil, send BYTES as a sticker instead.  Return the
+fixture file name."
+  (let ((file (signel-test--fixture bytes)))
+    (cl-letf (((symbol-function 'notifications-notify) #'ignore)
+              ((symbol-function 'signel--dashboard-refresh) #'ignore)
+              ((symbol-function 'display-buffer) #'ignore)
+              ((symbol-function 'signel--find-sticker) (lambda (&rest _) file)))
+      (signel--handle-receive
+       `((envelope . ((sourceNumber . ,source)
+                      (dataMessage
+                       . ((groupInfo . ((groupId . ,group-id)))
+                          ,(if sticker
+                               '(sticker . ((packId . "p") (stickerId . 1) (emoji . "🐱")))
+                             `(attachments . [((id . "a1") (contentType . "image/png")
+                                               (filename . "cat.png")
+                                               (storedFilename . ,file))]))))))))
+      file)))
+
+(ert-deftest signel-group-stranger-gets-button ()
+  (let ((signel--contacts (make-hash-table :test 'equal))
+        (signel--profile-names (make-hash-table :test 'equal))
+        (signel--active-chats (make-hash-table :test 'equal))
+        (signel-auto-display-images t)
+        (signel-account "+440"))
+    (puthash "+441" '(:name "Mum" :blocked nil) signel--contacts)
+    (signel-test-with-chat "GROUPID=="
+      (signel-test--with-image-stubs calls
+        (let ((file (signel-test--receive-image "GROUPID==" "+449" signel-test--png)))
+          (unwind-protect
+              (progn
+                (should (string-match-p "\\[Show image\\]" (buffer-string)))
+                (should-not (string-match-p "<IMG>" (buffer-string)))
+                (dolist (fn '(create-image insert-image image-multi-frame-p
+                              image-size image-animate convert))
+                  (should-not (signel-test--called calls fn))))
+            (delete-file file)))))))
+
+(ert-deftest signel-group-stranger-sticker-gets-button ()
+  (let ((signel--contacts (make-hash-table :test 'equal))
+        (signel--profile-names (make-hash-table :test 'equal))
+        (signel--active-chats (make-hash-table :test 'equal))
+        (signel-auto-display-images t))
+    (puthash "+441" '(:name "Mum" :blocked nil) signel--contacts)
+    (signel-test-with-chat "GROUPID=="
+      (signel-test--with-image-stubs calls
+        (let ((file (signel-test--receive-image "GROUPID==" "+449" signel-test--png t)))
+          (unwind-protect
+              (progn
+                (should (string-match-p "\\[Show sticker 🐱\\]" (buffer-string)))
+                (should-not calls))
+            (delete-file file)))))))
+
+(ert-deftest signel-group-contact-image-inline-from-data ()
+  (let ((signel--contacts (make-hash-table :test 'equal))
+        (signel--profile-names (make-hash-table :test 'equal))
+        (signel--active-chats (make-hash-table :test 'equal))
+        (signel-auto-display-images t))
+    (puthash "+441" '(:name "Mum" :blocked nil) signel--contacts)
+    (signel-test-with-chat "GROUPID=="
+      (signel-test--with-image-stubs calls
+        (let ((file (signel-test--receive-image "GROUPID==" "+441" signel-test--png)))
+          (unwind-protect
+              (let ((ci (car (signel-test--called calls 'create-image))))
+                (should (string-match-p "<IMG>" (buffer-string)))
+                (should-not (string-match-p "Show image" (buffer-string)))
+                ;; Loaded from the bytes, with an explicit type.
+                (should (equal (nth 1 ci) signel-test--png))
+                (should (eq (nth 2 ci) 'png))
+                (should (nth 3 ci)))
+            (delete-file file)))))))
+
+(ert-deftest signel-contact-svg-gets-button ()
+  (let ((signel--contacts (make-hash-table :test 'equal))
+        (signel--profile-names (make-hash-table :test 'equal))
+        (signel--active-chats (make-hash-table :test 'equal))
+        (signel-auto-display-images t))
+    (puthash "+441" '(:name "Mum" :blocked nil) signel--contacts)
+    (signel-test-with-chat "GROUPID=="
+      (signel-test--with-image-stubs calls
+        (let ((file (signel-test--receive-image "GROUPID==" "+441" signel-test--svg)))
+          (unwind-protect
+              (progn
+                (should (string-match-p "\\[Show image\\]" (buffer-string)))
+                (should-not calls))
+            (delete-file file)))))))
+
+(ert-deftest signel-show-image-button-renders-in-place ()
+  (let ((signel-auto-display-images t)
+        (signel-enable-animation t)
+        (signel-animation-max-time 7)
+        (file (signel-test--fixture signel-test--svg ".png")))
+    (unwind-protect
+        (signel-test-with-chat "+449"
+          (signel-test--with-image-stubs calls
+            (signel--insert-msg "+449" "X" "look"
+                                (vector `((id . "a") (storedFilename . ,file)))
+                                nil nil nil)
+            (goto-char (point-max))
+            (insert "draft")
+            (should-not calls)
+            (goto-char (point-min))
+            (search-forward "[Show image]")
+            (push-button (match-beginning 0))
+            (should-not (string-match-p "Show image" (buffer-string)))
+            (should (string-match-p "look\n+<IMG>\n" (buffer-string)))
+            (let ((ci (car (signel-test--called calls 'create-image))))
+              (should (equal (nth 1 ci) signel-test--svg))
+              (should (eq (nth 2 ci) 'svg)))
+            (should (equal (nth 3 (car (signel-test--called calls 'image-animate))) 7))
+            (should (string-suffix-p signel-prompt
+                                     (buffer-substring-no-properties
+                                      (point-min) signel--input-marker)))
+            (should (equal (buffer-substring-no-properties signel--input-marker (point-max))
+                           "draft"))))
+      (delete-file file))))
+
+(ert-deftest signel-auto-display-off-gives-button-for-contacts ()
+  (let ((signel-auto-display-images nil)
+        (file (signel-test--fixture signel-test--png)))
+    (unwind-protect
+        (signel-test-with-chat "+441"
+          (signel-test--with-image-stubs calls
+            (signel--insert-msg "+441" "Me" nil
+                                (vector `((id . "a") (storedFilename . ,file)))
+                                nil t t)
+            (should (string-match-p "\\[Show image\\]" (buffer-string)))
+            (should-not calls)))
+      (delete-file file))))
+
+(ert-deftest signel-unsniffable-attachment-keeps-file-button ()
+  (let ((file (signel-test--fixture "%PDF-1.4 hello" ".png")))
+    (unwind-protect
+        (signel-test-with-chat "+449"
+          (signel-test--with-image-stubs calls
+            (signel--insert-msg "+449" "X" nil
+                                (vector `((id . "a") (storedFilename . ,file)
+                                          (contentType . "image/png")
+                                          (filename . "doc.png")))
+                                nil nil t)
+            (should (string-match-p "\\[File: doc.png\\]" (buffer-string)))
+            (should-not calls)))
+      (delete-file file))))
+
+(ert-deftest signel-animation-is-bounded ()
+  (let ((signel-enable-animation t)
+        (signel-animation-max-time 15)
+        (file (signel-test--fixture signel-test--gif)))
+    (unwind-protect
+        (signel-test-with-chat "+441"
+          (signel-test--with-image-stubs calls
+            (signel--insert-msg "+441" "Mum" nil
+                                (vector `((id . "a") (storedFilename . ,file)))
+                                nil nil t)
+            (let ((anim (signel-test--called calls 'image-animate)))
+              (should (= (length anim) 1))
+              (should (equal (nth 3 (car anim)) signel-animation-max-time)))))
+      (delete-file file))))
+
+(ert-deftest signel-sticker-apng-converted-gif-deleted-after-load ()
+  (let ((signel-enable-animation t)
+        (png (signel-test--fixture signel-test--png))
+        (gif (signel-test--fixture signel-test--gif ".gif")))
+    (unwind-protect
+        (signel-test-with-chat "+441"
+          (signel-test--with-image-stubs calls
+            (cl-letf (((symbol-function 'signel--find-sticker) (lambda (&rest _) png))
+                      ((symbol-function 'executable-find)
+                       (lambda (p &rest _) (and (equal p "convert") "/usr/bin/convert")))
+                      ((symbol-function 'signel--convert-apng-to-gif)
+                       (lambda (f) (push (list 'convert f) calls) gif)))
+              (signel--insert-msg "+441" "Mum" nil nil
+                                  '((packId . "p") (stickerId . 1) (emoji . "🐱"))
+                                  nil t)
+              (should (signel-test--called calls 'convert))
+              (let ((ci (car (signel-test--called calls 'create-image))))
+                (should (equal (nth 1 ci) signel-test--gif))
+                (should (eq (nth 2 ci) 'gif)))
+              (should-not (file-exists-p gif))
+              (should (file-exists-p png)))))
+      (delete-file png)
+      (when (file-exists-p gif) (delete-file gif)))))
+
+(ert-deftest signel-sync-message-is-trusted ()
+  (let ((signel--contacts (make-hash-table :test 'equal))
+        (signel--active-chats (make-hash-table :test 'equal))
+        (signel-auto-display-images t)
+        (file (signel-test--fixture signel-test--png)))
+    (unwind-protect
+        (signel-test-with-chat "+449"
+          (signel-test--with-image-stubs calls
+            (cl-letf (((symbol-function 'signel--dashboard-refresh) #'ignore))
+              (signel--handle-receive
+               `((envelope . ((sourceNumber . "+440")
+                              (syncMessage
+                               . ((sentMessage
+                                   . ((destinationNumber . "+449")
+                                      (attachments . [((id . "a") (storedFilename . ,file))])))))))))
+              (should (string-match-p "<IMG>" (buffer-string))))))
+      (delete-file file))))

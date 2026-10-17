@@ -79,6 +79,17 @@ Default on Linux is typically ~/.local/share/signal-cli."
 When nil, only the first frame of animated media will be displayed."
   :type 'boolean)
 
+(defcustom signel-animation-max-time 15
+  "Maximum number of seconds an animated image or sticker keeps animating."
+  :type 'number)
+
+(defcustom signel-auto-display-images t
+  "If non-nil, show safe images from known contacts inline straight away.
+Only PNG, JPEG and GIF attachments (and WebP stickers) sent by contacts
+are decoded automatically.  Anything else, and every image when this is
+nil, is shown as a button that displays the image when clicked."
+  :type 'boolean)
+
 (defcustom signel-prompt "> "
   "The prompt string displayed in chat buffers."
   :type 'string)
@@ -494,7 +505,8 @@ Output is split into lines first; a line longer than
                     (sender sender-label))
 
 		(when (or msg-text attachments sticker)
-                  (signel--insert-msg chat-id sender msg-text attachments sticker nil)
+                  (signel--insert-msg chat-id sender msg-text attachments sticker nil
+                                      (signel--known-contact-p source-number source-uuid))
 
                   ;; Notify
                   (let ((notify-body (cond (msg-text msg-text)
@@ -517,7 +529,7 @@ Output is split into lines first; a line longer than
                      (attachments (alist-get 'attachments sent))
                      (sticker (alist-get 'sticker sent)))
 		(when (and dest (or msg-text attachments sticker))
-                  (signel--insert-msg dest "Me" msg-text attachments sticker t))))
+                  (signel--insert-msg dest "Me" msg-text attachments sticker t t))))
           (error (signel--log "Error handling sync message: %s" (error-message-string err))))
 
         ;; 3. Typing
@@ -579,78 +591,175 @@ Returns the path to the temporary GIF."
       (when (file-exists-p tmp-gif) (delete-file tmp-gif))
       nil)))
 
-(defun signel--insert-sticker (sticker)
-  "Insert STICKER (an alist from signal-cli) at point."
+;; Image types are always taken from the file's own bytes, never from the
+;; sender-supplied MIME type or file name.  Nothing is decoded for the
+;; button case until the owner clicks.
+
+(defun signel--sniff-image-buffer ()
+  "Return the image type of the unibyte bytes in the current buffer, or nil.
+Matches `image-type-header-regexps' directly, so the answer does not
+depend on which image libraries this Emacs was built with."
+  (let ((case-fold-search nil)
+        (header nil))
+    (save-excursion
+      (goto-char (point-min))
+      (cl-loop for (regexp . type) in image-type-header-regexps
+               when (cond ((symbolp type) (and (looking-at-p regexp) type))
+                          ((and (consp type) (looking-at-p regexp)
+                                (funcall (car type)
+                                         (or header
+                                             (setq header
+                                                   (buffer-substring
+                                                    (point-min)
+                                                    (min (point-max)
+                                                         (+ (point-min) 8192)))))))
+                           (cdr type)))
+               return it))))
+
+(defun signel--sniff-image-type (file)
+  "Return the image type of FILE from its first bytes, or nil.
+The MIME type and file name are ignored."
+  (when (and (stringp file) (file-regular-p file) (file-readable-p file))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert-file-contents-literally file nil 0 8192)
+      (signel--sniff-image-buffer))))
+
+(defun signel--image-action (sniffed-type known-p sticker-p)
+  "Decide how to show media of SNIFFED-TYPE.
+KNOWN-P is non-nil if the sender is a known contact; STICKER-P is non-nil
+for stickers.  Return `inline', `button' or `file'."
+  (cond ((null sniffed-type) 'file)
+        ((not signel-auto-display-images) 'button)
+        ((and known-p (memq sniffed-type '(png jpeg gif))) 'inline)
+        ((and known-p sticker-p (eq sniffed-type 'webp)) 'inline)
+        (t 'button)))
+
+(defun signel--read-image-file (file)
+  "Return (TYPE . BYTES) for FILE, TYPE being sniffed from BYTES."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (cons (signel--sniff-image-buffer) (buffer-string))))
+
+(defun signel--render-image (file expected-type max-width sticker-p)
+  "Insert the image in FILE at point, at most MAX-WIDTH pixels wide.
+The bytes are read once and decoded from memory with their sniffed type.
+If EXPECTED-TYPE is non-nil and the bytes are of another type, nothing is
+decoded.  For a sticker (STICKER-P non-nil), a PNG is converted to a GIF
+so APNG stickers animate; the GIF is deleted as soon as it is read.
+Animation stops after `signel-animation-max-time' seconds.
+Return non-nil if an image was inserted."
+  (let* ((loaded (signel--read-image-file file))
+         (type (car loaded))
+         (data (cdr loaded)))
+    (when (and type (or (null expected-type) (eq type expected-type)))
+      (when (and sticker-p (eq type 'png) (executable-find "convert"))
+        (let ((gif (signel--convert-apng-to-gif file)))
+          (when gif
+            (unwind-protect
+                (let ((converted (signel--read-image-file gif)))
+                  (when (eq (car converted) 'gif)
+                    (setq type 'gif
+                          data (cdr converted))))
+              (when (file-exists-p gif) (delete-file gif))))))
+      (let ((image (create-image data type t :max-width max-width)))
+        (when image
+          (insert-image image)
+          (when (and signel-enable-animation (fboundp 'image-animate)
+                     (image-multi-frame-p image))
+            (image-animate image nil signel-animation-max-time))
+          t)))))
+
+(defun signel--show-image (button file max-width sticker-p)
+  "Replace BUTTON with the image in FILE, as the owner asked.
+MAX-WIDTH and STICKER-P are as for `signel--render-image'.  Any image type
+the bytes sniff as is accepted, since the owner chose to see it."
+  (with-current-buffer (if (markerp button) (marker-buffer button) (current-buffer))
+    (let ((inhibit-read-only t)
+          (start (button-start button))
+          (end (button-end button)))
+      (save-excursion
+        (goto-char start)
+        (delete-region start end)
+        (unless (condition-case err
+                    (signel--render-image file nil max-width sticker-p)
+                  (error
+                   (signel--log "Image render error: %s" (error-message-string err))
+                   nil))
+          (insert (propertize "[Couldn't display image]" 'face 'signel-error-face)))))))
+
+(defun signel--insert-image-button (label file max-width sticker-p)
+  "Insert a button LABEL that shows the image in FILE when clicked.
+MAX-WIDTH and STICKER-P are passed to `signel--show-image'."
+  (insert-button label
+                 'action (lambda (button)
+                           (signel--show-image button file max-width sticker-p))
+                 'follow-link t
+                 'face 'link
+                 'help-echo "Not shown automatically.  Click to display."))
+
+(defun signel--insert-sticker (sticker &optional known-p)
+  "Insert STICKER (an alist from signal-cli) at point.
+KNOWN-P is non-nil if the sender is a known contact."
   (let* ((pack-id (alist-get 'packId sticker))
          (sticker-id (alist-get 'stickerId sticker))
          (emoji (or (alist-get 'emoji sticker) "🧩"))
          (file (if (and pack-id sticker-id)
                    (signel--find-sticker pack-id sticker-id)
-                 nil)))
+                 nil))
+         (type (and file (signel--sniff-image-type file))))
     (insert "\n")
-    (cond
-     ((and file (file-exists-p file))
-      (let* ((type (image-type-from-file-header file))
-             (final-file file)
-             (final-type type)
-             (converted nil))
+    (pcase (if (and file (file-exists-p file))
+               (signel--image-action type known-p t)
+             'missing)
+      ('inline
+       (unless (signel--render-image file type 150 t)
+         (insert (propertize (format "[Sticker %s (Render Failed)]" emoji)
+                             'face 'font-lock-warning-face))))
+      ('button
+       (signel--insert-image-button (format "[Show sticker %s]" emoji) file 150 t))
+      ;; File not found, or not an image
+      (_
+       (insert (propertize (format "[Sticker %s]" emoji)
+                           'face 'font-lock-constant-face))))))
 
-        ;; CONVERSION LOGIC: If PNG (APNG), try to convert to GIF
-        (when (and (eq type 'png) (executable-find "convert"))
-          (let ((gif (signel--convert-apng-to-gif file)))
-            (when gif
-              (setq final-file gif)
-              (setq final-type 'gif)
-              (setq converted t))))
+(defun signel--insert-image-file (file known-p)
+  "Insert FILE as an inline image or a [Show image] button.
+KNOWN-P is non-nil if the sender is a known contact.  Return nil, inserting
+nothing, if FILE is not an image."
+  (let ((type (signel--sniff-image-type file)))
+    (pcase (signel--image-action type known-p nil)
+      ('inline
+       (unless (signel--render-image file type 400 nil)
+         (insert (propertize "[Couldn't display image]" 'face 'signel-error-face)))
+       t)
+      ('button
+       (signel--insert-image-button "[Show image]" file 400 nil)
+       t)
+      (_ nil))))
 
-        ;; Load the image
-        (let ((image (create-image final-file final-type nil :max-width 150)))
-          ;; Clean up temp file if we created one
-          (when converted
-            (run-at-time "5 sec" nil (lambda (f) (when (file-exists-p f) (delete-file f))) final-file))
-
-          (if image
-              (progn
-                (insert-image image)
-                (when (and signel-enable-animation (fboundp 'image-animate))
-                  (image-animate image nil t))) ;; Loop forever
-            ;; Render failed
-            (insert (propertize (format "[Sticker %s (Render Failed)]" emoji)
-                                'face 'font-lock-warning-face))))))
-     ;; File not found
-     (t
-      (insert (propertize (format "[Sticker %s]" emoji)
-                          'face 'font-lock-constant-face))))))
-
-(defun signel--insert-attachment (att)
-  "Insert a button or inline image for the attachment ATT at point."
+(defun signel--insert-attachment (att &optional known-p)
+  "Insert a button or inline image for the attachment ATT at point.
+KNOWN-P is non-nil if the sender is a known contact."
   (let* ((path (alist-get 'storedFilename att))
          (type (alist-get 'contentType att))
          (name (or (alist-get 'filename att) "attachment")))
     (cond
-     ;; A: Inline Image
-     ((and path (string-prefix-p "image/" type) (file-exists-p path))
-      (let ((image (create-image path nil nil :max-width 400)))
-        (insert-image image)
-        (when (and signel-enable-animation (fboundp 'image-animate) (image-multi-frame-p image))
-          (image-animate image nil t))))
-     ;; B: File Button
      ((and path (file-exists-p path))
-      (insert-button (format "[File: %s]" name)
-                     'action (lambda (_) (browse-url-of-file path))
-                     'face 'link
-                     'help-echo (format "Type: %s\nPath: %s" type path)))
+      ;; A: Image (inline or button); B: File Button
+      (unless (signel--insert-image-file path known-p)
+        (insert-button (format "[File: %s]" name)
+                       'action (lambda (_) (browse-url-of-file path))
+                       'face 'link
+                       'help-echo (format "Type: %s\nPath: %s" type path))))
      ;; C: Missing/Not Downloaded
      (t
       (let* ((att-id (alist-get 'id att))
              (std-path (expand-file-name (format "attachments/%s" att-id) signel-data-directory))
              (exists (file-exists-p std-path)))
         (if exists
-            (if (string-prefix-p "image/" type)
-                (let ((image (create-image std-path nil nil :max-width 400)))
-                  (insert-image image)
-                  (when (and signel-enable-animation (fboundp 'image-animate) (image-multi-frame-p image))
-                    (image-animate image nil t)))
+            (unless (signel--insert-image-file std-path known-p)
               (insert-button (format "[File: %s]" name)
                              'action (lambda (_) (browse-url-of-file std-path))
                              'face 'link))
@@ -658,14 +767,15 @@ Returns the path to the temporary GIF."
                          'action (lambda (_) (message "File not found at %s" std-path))
                          'face 'font-lock-comment-face)))))))
 
-(defun signel--insert-media (attachments sticker &optional _known-p)
+(defun signel--insert-media (attachments sticker &optional known-p)
   "Insert buttons or inline images for ATTACHMENTS and STICKER.
 Handles animation support if enabled.  Each item is rendered on its own
 so one malformed item shows a placeholder instead of aborting the rest.
-_KNOWN-P is reserved for deciding whether images render inline."
+KNOWN-P is non-nil if the sender is a known contact; see
+`signel--image-action' for which images then render inline."
   (when sticker
     (condition-case err
-        (signel--insert-sticker sticker)
+        (signel--insert-sticker sticker known-p)
       (error
        (signel--log "Sticker render error: %s" (error-message-string err))
        (insert (propertize "[Couldn't display sticker]" 'face 'signel-error-face)))))
@@ -673,7 +783,7 @@ _KNOWN-P is reserved for deciding whether images render inline."
     (dolist (att (if (vectorp attachments) (append attachments nil) attachments))
       (insert "\n")
       (condition-case err
-          (signel--insert-attachment att)
+          (signel--insert-attachment att known-p)
         (error
          (signel--log "Attachment render error: %s" (error-message-string err))
          (insert (propertize "[Couldn't display attachment]" 'face 'signel-error-face)))))))
