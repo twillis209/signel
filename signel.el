@@ -486,45 +486,51 @@ Output is split into lines first; a line longer than
         (signel--dashboard-refresh)
 
         ;; 1. Incoming Data (Text OR Attachments)
-        (when data
-          (let ((msg-text (alist-get 'message data))
-                (attachments (alist-get 'attachments data))
-                (sticker (alist-get 'sticker data))
-                (sender sender-label))
+        (condition-case err
+            (when data
+              (let ((msg-text (alist-get 'message data))
+                    (attachments (alist-get 'attachments data))
+                    (sticker (alist-get 'sticker data))
+                    (sender sender-label))
 
-            (when (or msg-text attachments sticker)
-              (signel--insert-msg chat-id sender msg-text attachments sticker nil)
+		(when (or msg-text attachments sticker)
+                  (signel--insert-msg chat-id sender msg-text attachments sticker nil)
 
-              ;; Notify
-              (let ((notify-body (cond (msg-text msg-text)
-                                       (sticker "[Sticker]")
-                                       (attachments "[Attachment]")
-                                       (t "New Message"))))
-                (notifications-notify :title (format "Signel: %s" sender)
-                                      :body notify-body))
+                  ;; Notify
+                  (let ((notify-body (cond (msg-text msg-text)
+                                           (sticker "[Sticker]")
+                                           (attachments "[Attachment]")
+                                           (t "New Message"))))
+                    (notifications-notify :title (format "Signel: %s" sender)
+                                          :body notify-body))
 
-              (when signel-auto-open-buffer
-                (display-buffer (signel--get-buffer chat-id))))))
+                  (when signel-auto-open-buffer
+                    (display-buffer (signel--get-buffer chat-id))))))
+          (error (signel--log "Error handling incoming data: %s" (error-message-string err))))
 
         ;; 2. Sync (My sent messages)
-        (when sync
-          (let* ((sent (alist-get 'sentMessage sync))
-                 (dest (alist-get 'destinationNumber sent))
-                 (msg-text (alist-get 'message sent))
-                 (attachments (alist-get 'attachments sent))
-                 (sticker (alist-get 'sticker sent)))
-            (when (and dest (or msg-text attachments sticker))
-              (signel--insert-msg dest "Me" msg-text attachments sticker t))))
+        (condition-case err
+            (when sync
+              (let* ((sent (alist-get 'sentMessage sync))
+                     (dest (alist-get 'destinationNumber sent))
+                     (msg-text (alist-get 'message sent))
+                     (attachments (alist-get 'attachments sent))
+                     (sticker (alist-get 'sticker sent)))
+		(when (and dest (or msg-text attachments sticker))
+                  (signel--insert-msg dest "Me" msg-text attachments sticker t))))
+          (error (signel--log "Error handling sync message: %s" (error-message-string err))))
 
         ;; 3. Typing
-        (when typing
-          (let ((action (alist-get 'action typing)))
-            (when (member action '("STARTED" "STOPPED"))
-              (with-current-buffer (signel--get-buffer chat-id)
-                (setq mode-line-process
-                      (and (string= action "STARTED")
-                           (format " [%s...]" (signel--mode-line-escape sender-label))))
-                (force-mode-line-update)))))))))
+        (condition-case err
+            (when typing
+              (let ((action (alist-get 'action typing)))
+		(when (member action '("STARTED" "STOPPED"))
+                  (with-current-buffer (signel--get-buffer chat-id)
+                    (setq mode-line-process
+                          (and (string= action "STARTED")
+                               (format " [%s...]" (signel--mode-line-escape sender-label))))
+                    (force-mode-line-update)))))
+          (error (signel--log "Error handling typing indicator: %s" (error-message-string err))))))))
 
 ;;; Media & Stickers
 
@@ -573,90 +579,104 @@ Returns the path to the temporary GIF."
       (when (file-exists-p tmp-gif) (delete-file tmp-gif))
       nil)))
 
-(defun signel--insert-media (attachments sticker)
-  "Insert buttons or inline images for ATTACHMENTS and STICKER.
-Handles animation support if enabled."
-  ;; 1. Handle Stickers
-  (when sticker
-    (let* ((pack-id (alist-get 'packId sticker))
-           (sticker-id (alist-get 'stickerId sticker))
-           (emoji (or (alist-get 'emoji sticker) "🧩"))
-           (file (if (and pack-id sticker-id)
-                     (signel--find-sticker pack-id sticker-id)
-                   nil)))
-      (insert "\n")
-      (cond
-       ((and file (file-exists-p file))
-        (let* ((type (image-type-from-file-header file))
-               (final-file file)
-               (final-type type)
-               (converted nil))
+(defun signel--insert-sticker (sticker)
+  "Insert STICKER (an alist from signal-cli) at point."
+  (let* ((pack-id (alist-get 'packId sticker))
+         (sticker-id (alist-get 'stickerId sticker))
+         (emoji (or (alist-get 'emoji sticker) "🧩"))
+         (file (if (and pack-id sticker-id)
+                   (signel--find-sticker pack-id sticker-id)
+                 nil)))
+    (insert "\n")
+    (cond
+     ((and file (file-exists-p file))
+      (let* ((type (image-type-from-file-header file))
+             (final-file file)
+             (final-type type)
+             (converted nil))
 
-          ;; CONVERSION LOGIC: If PNG (APNG), try to convert to GIF
-          (when (and (eq type 'png) (executable-find "convert"))
-            (let ((gif (signel--convert-apng-to-gif file)))
-              (when gif
-                (setq final-file gif)
-                (setq final-type 'gif)
-                (setq converted t))))
+        ;; CONVERSION LOGIC: If PNG (APNG), try to convert to GIF
+        (when (and (eq type 'png) (executable-find "convert"))
+          (let ((gif (signel--convert-apng-to-gif file)))
+            (when gif
+              (setq final-file gif)
+              (setq final-type 'gif)
+              (setq converted t))))
 
-          ;; Load the image
-          (let ((image (create-image final-file final-type nil :max-width 150)))
-            ;; Clean up temp file if we created one
-            (when converted
-              (run-at-time "5 sec" nil (lambda (f) (when (file-exists-p f) (delete-file f))) final-file))
+        ;; Load the image
+        (let ((image (create-image final-file final-type nil :max-width 150)))
+          ;; Clean up temp file if we created one
+          (when converted
+            (run-at-time "5 sec" nil (lambda (f) (when (file-exists-p f) (delete-file f))) final-file))
 
-            (if image
-                (progn
+          (if image
+              (progn
+                (insert-image image)
+                (when (and signel-enable-animation (fboundp 'image-animate))
+                  (image-animate image nil t))) ;; Loop forever
+            ;; Render failed
+            (insert (propertize (format "[Sticker %s (Render Failed)]" emoji)
+                                'face 'font-lock-warning-face))))))
+     ;; File not found
+     (t
+      (insert (propertize (format "[Sticker %s]" emoji)
+                          'face 'font-lock-constant-face))))))
+
+(defun signel--insert-attachment (att)
+  "Insert a button or inline image for the attachment ATT at point."
+  (let* ((path (alist-get 'storedFilename att))
+         (type (alist-get 'contentType att))
+         (name (or (alist-get 'filename att) "attachment")))
+    (cond
+     ;; A: Inline Image
+     ((and path (string-prefix-p "image/" type) (file-exists-p path))
+      (let ((image (create-image path nil nil :max-width 400)))
+        (insert-image image)
+        (when (and signel-enable-animation (fboundp 'image-animate) (image-multi-frame-p image))
+          (image-animate image nil t))))
+     ;; B: File Button
+     ((and path (file-exists-p path))
+      (insert-button (format "[File: %s]" name)
+                     'action (lambda (_) (browse-url-of-file path))
+                     'face 'link
+                     'help-echo (format "Type: %s\nPath: %s" type path)))
+     ;; C: Missing/Not Downloaded
+     (t
+      (let* ((att-id (alist-get 'id att))
+             (std-path (expand-file-name (format "attachments/%s" att-id) signel-data-directory))
+             (exists (file-exists-p std-path)))
+        (if exists
+            (if (string-prefix-p "image/" type)
+                (let ((image (create-image std-path nil nil :max-width 400)))
                   (insert-image image)
-                  (when (and signel-enable-animation (fboundp 'image-animate))
-                    (image-animate image nil t))) ;; Loop forever
-              ;; Render failed
-              (insert (propertize (format "[Sticker %s (Render Failed)]" emoji)
-                                  'face 'font-lock-warning-face))))))
-       ;; File not found
-       (t
-        (insert (propertize (format "[Sticker %s]" emoji)
-                            'face 'font-lock-constant-face))))))
+                  (when (and signel-enable-animation (fboundp 'image-animate) (image-multi-frame-p image))
+                    (image-animate image nil t)))
+              (insert-button (format "[File: %s]" name)
+                             'action (lambda (_) (browse-url-of-file std-path))
+                             'face 'link))
+          (insert-button (format "[File: %s (Not Downloaded)]" name)
+                         'action (lambda (_) (message "File not found at %s" std-path))
+                         'face 'font-lock-comment-face)))))))
 
-  ;; 2. Handle Attachments
+(defun signel--insert-media (attachments sticker &optional _known-p)
+  "Insert buttons or inline images for ATTACHMENTS and STICKER.
+Handles animation support if enabled.  Each item is rendered on its own
+so one malformed item shows a placeholder instead of aborting the rest.
+_KNOWN-P is reserved for deciding whether images render inline."
+  (when sticker
+    (condition-case err
+        (signel--insert-sticker sticker)
+      (error
+       (signel--log "Sticker render error: %s" (error-message-string err))
+       (insert (propertize "[Couldn't display sticker]" 'face 'signel-error-face)))))
   (when attachments
-    (let ((att-list (if (vectorp attachments) (append attachments nil) attachments)))
-      (dolist (att att-list)
-        (let* ((path (alist-get 'storedFilename att))
-               (type (alist-get 'contentType att))
-               (name (or (alist-get 'filename att) "attachment")))
-          (insert "\n")
-          (cond
-           ;; A: Inline Image
-           ((and path (string-prefix-p "image/" type) (file-exists-p path))
-            (let ((image (create-image path nil nil :max-width 400)))
-              (insert-image image)
-              (when (and signel-enable-animation (fboundp 'image-animate) (image-multi-frame-p image))
-                (image-animate image nil t))))
-           ;; B: File Button
-           ((and path (file-exists-p path))
-            (insert-button (format "[File: %s]" name)
-                           'action (lambda (_) (browse-url-of-file path))
-                           'face 'link
-                           'help-echo (format "Type: %s\nPath: %s" type path)))
-           ;; C: Missing/Not Downloaded
-           (t
-            (let* ((att-id (alist-get 'id att))
-                   (std-path (expand-file-name (format "attachments/%s" att-id) signel-data-directory))
-                   (exists (file-exists-p std-path)))
-              (if exists
-                  (if (string-prefix-p "image/" type)
-                      (let ((image (create-image std-path nil nil :max-width 400)))
-                        (insert-image image)
-                        (when (and signel-enable-animation (fboundp 'image-animate) (image-multi-frame-p image))
-                          (image-animate image nil t)))
-                    (insert-button (format "[File: %s]" name)
-                                   'action (lambda (_) (browse-url-of-file std-path))
-                                   'face 'link))
-                (insert-button (format "[File: %s (Not Downloaded)]" name)
-                               'action (lambda (_) (message "File not found at %s" std-path))
-                               'face 'font-lock-comment-face))))))))))
+    (dolist (att (if (vectorp attachments) (append attachments nil) attachments))
+      (insert "\n")
+      (condition-case err
+          (signel--insert-attachment att)
+        (error
+         (signel--log "Attachment render error: %s" (error-message-string err))
+         (insert (propertize "[Couldn't display attachment]" 'face 'signel-error-face)))))))
 
 ;;; Buffer & UI Management
 
@@ -709,48 +729,59 @@ Handles animation support if enabled."
     ;; Update the marker to the end of the prompt
     (set-marker signel--input-marker (point))))
 
-(defun signel--insert-msg (id name text attachments sticker is-me)
+(defmacro signel--with-prompt-preserved (&rest body)
+  "Run BODY with the prompt and any typed input removed, then restore both.
+BODY runs with point where the prompt line started.  The prompt is redrawn
+and the owner's half-typed text re-inserted after it even if BODY signals;
+point stays in the input area if it was there."
+  (declare (indent 0) (debug t))
+  `(let* ((inhibit-read-only t)
+          (--sp-start (and signel--input-marker (marker-position signel--input-marker)))
+          (--sp-typed (and --sp-start (buffer-substring --sp-start (point-max))))
+          (--sp-in-input (and --sp-start (>= (point) --sp-start)))
+          (--sp-offset (and --sp-in-input (- (point) --sp-start))))
+     (unwind-protect
+         (save-excursion
+           (goto-char (or --sp-start (point-max)))
+           (forward-line 0)
+           (delete-region (point) (point-max))
+           (unwind-protect (progn ,@body)
+             (signel--draw-prompt)
+             (when --sp-typed (insert --sp-typed))))
+       (when --sp-in-input (goto-char (+ signel--input-marker --sp-offset))))))
+
+(defun signel--insert-msg (id name text attachments sticker is-me &optional known-p)
   "Insert text and media into the buffer for chat ID.
 NAME is the sender, TEXT is the content, ATTACHMENTS and STICKER contain
-media data, and IS-ME is non-nil if the message is from the user."
+media data, and IS-ME is non-nil if the message is from the user.
+KNOWN-P is passed to `signel--insert-media'.  Return a marker at the start
+of the inserted message line."
   (with-current-buffer (signel--get-buffer id)
-    (let ((inhibit-read-only t)
-          (name-face (if is-me 'signel-my-msg-face 'signel-other-msg-face)))
-      (save-excursion
-        ;; Move to just before the prompt
-        (goto-char (marker-position signel--input-marker))
-        (forward-line 0) ;; Ensure we are at start of prompt line (usually empty above)
-
-        ;; If the previous line isn't a newline, insert one
-        (unless (bolp) (insert "\n"))
-
-        ;; Delete the prompt from the view momentarily (optional, but cleaner)
-        (delete-region (point) (point-max))
-
-        ;; Insert Message
-        (insert (propertize (format-time-string "[%H:%M] ") 'face 'signel-timestamp-face))
-        (insert (propertize (concat "<" name "> ") 'face name-face))
-        (when text (insert text))
-        (when (or attachments sticker)
-          (when text (insert "\n"))
-          (signel--insert-media attachments sticker))
-        (insert "\n")
-
-        ;; Redraw Prompt at the new bottom
-        (signel--draw-prompt)))
-
-    (let ((win (get-buffer-window (signel--get-buffer id))))
-      (when win (set-window-point win (point-max))))))
+    (let ((name-face (if is-me 'signel-my-msg-face 'signel-other-msg-face))
+          (line-start nil))
+      (signel--with-prompt-preserved
+       (setq line-start (copy-marker (point)))
+       (insert (propertize (format-time-string "[%H:%M] ") 'face 'signel-timestamp-face))
+       (insert (propertize (concat "<" name "> ") 'face name-face))
+       (when text
+         (condition-case err
+             (insert text)
+           (error
+            (signel--log "Message render error: %s" (error-message-string err))
+            (insert (propertize "[Couldn't display message]" 'face 'signel-error-face)))))
+       (when (or attachments sticker)
+         (when text (insert "\n"))
+         (signel--insert-media attachments sticker known-p))
+       (insert "\n"))
+      (let ((win (get-buffer-window (current-buffer))))
+        (when (and win (not (eq win (selected-window))))
+          (set-window-point win (point-max))))
+      line-start)))
 
 (defun signel--insert-system-msg (text face)
   "Insert a system message with TEXT using FACE."
-  (let ((inhibit-read-only t))
-    (save-excursion
-      (goto-char (if signel--input-marker (marker-position signel--input-marker) (point-max)))
-      (forward-line 0)
-      (delete-region (point) (point-max))
-      (insert (propertize (concat "*** " text "\n") 'face face))
-      (signel--draw-prompt))))
+  (signel--with-prompt-preserved
+   (insert (propertize (concat "*** " text "\n") 'face face))))
 
 ;;; Interactive Commands
 

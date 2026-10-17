@@ -269,3 +269,76 @@ Return the list of (RESULT ERROR) callback invocations."
       (ignore-errors
         (signel--dispatch '((id . 9) (error . ((message . "x")))))))
     (should called)))
+
+(ert-deftest signel-insert-msg-survives-bad-attachment ()
+  (signel-test-with-chat "+441"
+    (let ((file (make-temp-file "signel-att")))
+      (unwind-protect
+          ;; Existing file with a non-string contentType makes `string-prefix-p' signal.
+          (signel--insert-msg "+441" "X" "hi"
+                              (vector `((id . "a") (storedFilename . ,file) (contentType . 5)))
+                              nil nil)
+        (delete-file file)))
+    (should (string-match-p "Couldn't display attachment" (buffer-string)))
+    (should (string-match-p "hi" (buffer-string)))
+    (should (string-suffix-p signel-prompt
+                             (buffer-substring-no-properties (point-min) signel--input-marker)))))
+
+(ert-deftest signel-insert-msg-keeps-typed-input ()
+  (signel-test-with-chat "+441"
+    (goto-char (point-max))
+    (insert "half typed")
+    (signel--insert-msg "+441" "X" "incoming" nil nil nil)
+    (should (equal (buffer-substring-no-properties signel--input-marker (point-max))
+                   "half typed"))
+    (should (= (point) (point-max)))))
+
+(ert-deftest signel-insert-msg-keeps-point-inside-typed-input ()
+  (signel-test-with-chat "+441"
+    (goto-char (point-max))
+    (insert "half typed")
+    (goto-char (+ signel--input-marker 4))
+    (signel--insert-msg "+441" "X" "incoming" nil nil nil)
+    (should (= (point) (+ signel--input-marker 4)))))
+
+(ert-deftest signel-insert-msg-error-in-media-keeps-prompt ()
+  (signel-test-with-chat "+441"
+    (goto-char (point-max))
+    (insert "typed")
+    (cl-letf (((symbol-function 'signel--insert-media)
+               (lambda (&rest _) (error "boom"))))
+      (ignore-errors
+        (signel--insert-msg "+441" "X" "hi" (vector '((id . "a"))) nil nil)))
+    (should (string-match-p "hi" (buffer-string)))
+    (should (string-suffix-p signel-prompt
+                             (buffer-substring-no-properties (point-min) signel--input-marker)))
+    (should (equal (buffer-substring-no-properties signel--input-marker (point-max)) "typed"))))
+
+(ert-deftest signel-insert-msg-returns-stable-line-marker ()
+  (signel-test-with-chat "+441"
+    (let ((m (signel--insert-msg "+441" "X" "first" nil nil nil)))
+      (should (markerp m))
+      (signel--insert-msg "+441" "X" "second" nil nil nil)
+      (goto-char m)
+      (should (looking-at-p "\\[[0-9:]+\\] <X> first")))))
+
+(ert-deftest signel-insert-system-msg-keeps-typed-input ()
+  (signel-test-with-chat "+441"
+    (goto-char (point-max))
+    (insert "draft")
+    (signel--insert-system-msg "note" 'signel-error-face)
+    (should (string-match-p "\\*\\*\\* note" (buffer-string)))
+    (should (string-suffix-p signel-prompt
+                             (buffer-substring-no-properties (point-min) signel--input-marker)))
+    (should (equal (buffer-substring-no-properties signel--input-marker (point-max)) "draft"))))
+
+(ert-deftest signel-receive-data-failure-does-not-stop-typing ()
+  (signel-test-with-chat "+441"
+    (cl-letf (((symbol-function 'signel--insert-msg) (lambda (&rest _) (error "boom")))
+              ((symbol-function 'signel--dashboard-refresh) #'ignore)
+              ((symbol-function 'notifications-notify) #'ignore))
+      (signel--handle-receive
+       '((envelope . ((sourceNumber . "+441")
+                      (dataMessage . ((message . "hi")))
+                      (typingMessage . ((action . "STARTED"))))))))
+    (should (string-match-p "\\[" (format "%s" mode-line-process)))))
