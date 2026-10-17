@@ -201,7 +201,7 @@ Each value is a plist (:name STRING :blocked BOOL).")
 (defun signel--sanitize-name (string)
   "Return STRING without control or bidi characters, trimmed, or \"?\"."
   (let* ((clean (replace-regexp-in-string
-                 "[[:cntrl:]\u0080-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+                 "[[:cntrl:]\177\u0080-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
                  "" (if (stringp string) string "")))
          (trimmed (string-trim clean)))
     (if (string-empty-p trimmed) "?" trimmed)))

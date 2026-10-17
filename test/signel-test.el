@@ -194,6 +194,8 @@ Return the list of (RESULT ERROR) callback invocations."
 
 (ert-deftest signel-sanitize-strips-controls-and-bidi ()
   (should (equal (signel--sanitize-name "Ali\ne‮fdp.exe") "Aliefdp.exe")))
+(ert-deftest signel-sanitize-strips-del ()
+  (should (equal (signel--sanitize-name "a\177b") "ab")))
 (ert-deftest signel-sanitize-keeps-unicode ()
   (should (equal (signel--sanitize-name "Zoë 🚣 Ἀθηνᾶ") "Zoë 🚣 Ἀθηνᾶ")))
 (ert-deftest signel-sanitize-empty-gives-question-mark ()
