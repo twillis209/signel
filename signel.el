@@ -911,7 +911,10 @@ nothing, if FILE is not an image."
 (defun signel--make-attachment (name bytes)
   "Return an attachment plist for NAME and the unibyte string BYTES.
 Keys: :name :bytes :image-type :mime :clean.  The image type comes from
-BYTES, never from NAME.  Signal a `user-error' if BYTES is too large."
+BYTES, never from NAME.  A multibyte BYTES holding only raw bytes is
+converted to unibyte; one with other characters signals an error.
+Signal a `user-error' if BYTES is too large."
+  (setq bytes (string-to-unibyte bytes))
   (signel--check-attachment-size (length bytes))
   (let* ((clean-name (replace-regexp-in-string
                       "[/\\\\]" "_"
@@ -944,6 +947,43 @@ Signal a `user-error' before reading if it exceeds the size limit."
     (set-buffer-multibyte nil)
     (insert-file-contents-literally file)
     (buffer-string)))
+
+(defun signel--clipboard-command-bytes (program &rest args)
+  "Run PROGRAM with ARGS and return its stdout as a unibyte string.
+Return nil if PROGRAM is not installed or exits non-zero."
+  (when (executable-find program)
+    (let ((coding-system-for-read 'binary))
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (when (eq 0 (apply #'call-process program nil (list t nil) nil args))
+          (buffer-string))))))
+
+(defun signel--clipboard-image ()
+  "Return the clipboard image as (TYPE . BYTES), or nil.  Never signals.
+Ask Emacs for an image/png selection when a window system is active,
+then fall back to pngpaste (macOS), wl-paste (Wayland) or xclip.  The
+bytes must sniff as an image."
+  (condition-case err
+      (let ((check (lambda (data)
+                     (when (stringp data)
+                       (let* ((bytes (string-to-unibyte data))
+                              (type (signel--sniff-bytes bytes)))
+                         (and type (cons type bytes)))))))
+        (or (and (fboundp 'gui-get-selection) window-system
+                 (funcall check (ignore-errors
+                                  (gui-get-selection 'CLIPBOARD 'image/png))))
+            (funcall check
+                     (cond
+                      ((eq system-type 'darwin)
+                       (signel--clipboard-command-bytes "pngpaste" "-"))
+                      ((and (getenv "WAYLAND_DISPLAY")
+                            (executable-find "wl-paste"))
+                       (signel--clipboard-command-bytes
+                        "wl-paste" "--no-newline" "--type" "image/png"))
+                      (t (signel--clipboard-command-bytes
+                          "xclip" "-selection" "clipboard" "-t" "image/png" "-o"))))))
+    (error (signel--log "Clipboard image read failed: %s" (error-message-string err))
+           nil)))
 
 ;;; Metadata cleaning
 
@@ -1104,6 +1144,24 @@ KNOWN-P is non-nil if the sender is a known contact; see
     (when (< (point) limit)
       (goto-char limit))))
 
+(defvar-local signel--pending nil
+  "Attachment plists queued for the next message, oldest first.")
+
+(defvar-local signel--pending-overlay nil
+  "Overlay at the start of the prompt that shows `signel--pending'.")
+
+(defvar signel-chat-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'signel--send-input)
+    (define-key map (kbd "C-c C-c") #'signel--send-input)
+    (define-key map (kbd "C-c C-a") #'signel-attach-file)
+    (define-key map (kbd "C-c C-k") #'signel-remove-pending)
+    (define-key map [remap yank] #'signel-paste)
+    (define-key map [remap evil-paste-after] #'signel-paste)
+    (define-key map [remap evil-paste-before] #'signel-paste)
+    map)
+  "Keymap for `signel-chat-mode'.")
+
 (define-derived-mode signel-chat-mode fundamental-mode "Signel"
   "Major mode for Signal chats."
   (setq-local paragraph-start (regexp-quote signel-prompt))
@@ -1117,10 +1175,7 @@ KNOWN-P is non-nil if the sender is a known contact; see
   ;; Setup Input Marker
   (setq signel--input-marker (make-marker))
 
-  (add-hook 'post-command-hook #'signel--guard-cursor nil t)
-  (local-set-key (kbd "RET") #'signel--send-input)
-  (local-set-key (kbd "C-c C-c") #'signel--send-input)
-  (local-set-key (kbd "C-c C-a") #'signel-attach-file))
+  (add-hook 'post-command-hook #'signel--guard-cursor nil t))
 
 (defun signel--get-buffer (id)
   "Get or create a chat buffer for ID."
@@ -1144,7 +1199,85 @@ KNOWN-P is non-nil if the sender is a known contact; see
                         'rear-nonsticky '(read-only face)
                         'front-sticky '(read-only face)))
     ;; Update the marker to the end of the prompt
-    (set-marker signel--input-marker (point))))
+    (set-marker signel--input-marker (point))
+    (signel--draw-pending)))
+
+(defun signel--chat-name ()
+  "Return the display name of the current chat."
+  (let ((id signel--chat-id))
+    (cond ((null id) "?")
+          ((signel--is-group-id id) (or (gethash id signel--groups) id))
+          (t (let ((number-p (string-prefix-p "+" id)))
+               (signel--display-name (and number-p id) (and (not number-p) id)
+                                     (gethash id signel--profile-names) nil))))))
+
+(defun signel--pending-item-string (att)
+  "Return the pending-row text for attachment ATT."
+  (let* ((type (plist-get att :image-type))
+         (label (format "[%s]" (plist-get att :name)))
+         (image (and (memq type '(png jpeg gif webp))
+                     (condition-case nil
+                         (create-image (plist-get att :bytes) type t :max-height 64)
+                       (error nil)))))
+    (concat (if image (propertize label 'display image) label)
+            (if (and type (not (plist-get att :clean)))
+                (propertize " ⚠ metadata not removed" 'face 'signel-error-face)
+              ""))))
+
+(defun signel--draw-pending ()
+  "Show `signel--pending' in an overlay just before the prompt."
+  (when (and signel--input-marker (marker-position signel--input-marker))
+    (let ((end (marker-position signel--input-marker)))
+      (unless (overlayp signel--pending-overlay)
+        (setq signel--pending-overlay (make-overlay end end nil t nil)))
+      (move-overlay signel--pending-overlay
+                    (max (point-min) (- end (length signel-prompt))) end)
+      (overlay-put signel--pending-overlay 'before-string
+                   (when signel--pending
+                     (concat (format "To %s: " (signel--chat-name))
+                             (mapconcat #'signel--pending-item-string
+                                        signel--pending " ")
+                             "\n"))))))
+
+(defun signel--add-pending (att)
+  "Clean the attachment ATT, queue it for the next message and redraw."
+  (setq signel--pending
+        (append signel--pending (list (signel--clean-attachment att))))
+  (signel--draw-pending))
+
+(defun signel-remove-pending (&optional all)
+  "Remove the last queued attachment, or all of them with prefix ALL."
+  (interactive "P")
+  (unless signel--pending
+    (user-error "No pending attachments"))
+  (setq signel--pending (if all nil (butlast signel--pending)))
+  (signel--draw-pending))
+
+(defconst signel--image-extensions
+  '((png . "png") (jpeg . "jpg") (gif . "gif") (webp . "webp"))
+  "File name extensions for clipboard image types.")
+
+(defun signel-paste ()
+  "Queue a clipboard image for this chat, or paste text as usual.
+If the clipboard holds an image (and no evil register was named), add
+it to the pending attachments without touching the buffer text.
+Otherwise run the command this one remaps, with the same prefix arg."
+  (interactive)
+  (let ((image (and (not (bound-and-true-p evil-this-register))
+                    (signel--clipboard-image))))
+    (if (not image)
+        (call-interactively
+         (if (and this-original-command
+                  (not (eq this-original-command 'signel-paste)))
+             this-original-command
+           #'yank))
+      (signel--add-pending
+       (signel--make-attachment
+        (format "clipboard-%s.%s" (format-time-string "%Y%m%d-%H%M%S")
+                (or (alist-get (car image) signel--image-extensions)
+                    (symbol-name (car image))))
+        (cdr image)))
+      (message "Image added; type a caption and press RET to send"))))
 
 (defmacro signel--with-prompt-preserved (&rest body)
   "Run BODY with the prompt and any typed input removed, then restore both.
@@ -1298,18 +1431,15 @@ with the failure on partial delivery failure or an RPC error."
 
 ;;;###autoload
 (defun signel-attach-file (file-path)
-  "Send FILE-PATH as an attachment to the current chat."
+  "Queue FILE-PATH as an attachment for the next message in this chat."
   (interactive "fAttachment: ")
   (unless signel--chat-id
     (user-error "Not in a Signal chat buffer"))
-  (let* ((full-path (expand-file-name file-path))
-         (is-group (signel--is-group-id signel--chat-id))
-         (params `((attachments . [,full-path]))))
-    (if is-group
-        (push `(groupId . ,signel--chat-id) params)
-      (push `(recipient . [,signel--chat-id]) params))
-    (signel--send-with-status
-     params (format "[Sending: %s]" (file-name-nondirectory full-path)))))
+  (let ((full-path (expand-file-name file-path)))
+    (signel--add-pending
+     (signel--make-attachment (file-name-nondirectory full-path)
+                              (signel--read-file-bytes full-path)))
+    (message "Image added; type a caption and press RET to send")))
 
 ;;;###autoload
 (defun signel-chat (recipient)

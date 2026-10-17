@@ -1085,3 +1085,204 @@ The stub replaces the buffer with RESULT-BYTES and returns STATUS."
           (should-not calls)
           (should (plist-get out :clean))
           (should (equal (plist-get out :bytes) data)))))))
+
+(ert-deftest signel-make-attachment-accepts-multibyte-raw-bytes ()
+  (let ((att (signel--make-attachment
+              "x.png" (string-to-multibyte
+                       (unibyte-string #x89 ?P ?N ?G ?\r ?\n #x1a ?\n)))))
+    (should (eq (plist-get att :image-type) 'png))
+    (should-not (multibyte-string-p (plist-get att :bytes)))))
+
+(ert-deftest signel-make-attachment-rejects-non-byte-characters ()
+  (should-error (signel--make-attachment "x.txt" "é")))
+
+;;; Pending attachments
+
+(defvar evil-this-register)
+
+(defconst signel-test--png-bytes (unibyte-string #x89 ?P ?N ?G ?\r ?\n #x1a ?\n 0 0))
+
+(defmacro signel-test-with-pending (&rest body)
+  "Run BODY in a chat buffer with cleaning and image creation stubbed."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'signel--clean-attachment)
+              (lambda (att) (plist-put (copy-sequence att) :clean t)))
+             ((symbol-function 'create-image)
+              (lambda (&rest args) (list 'image :type (nth 1 args)))))
+     (signel-test-with-chat "+15550009" ,@body)))
+
+(defun signel-test--history ()
+  "Return the buffer text before the prompt line."
+  (buffer-substring-no-properties
+   (point-min) (- signel--input-marker (length signel-prompt))))
+
+(ert-deftest signel-paste-text-falls-through ()
+  (signel-test-with-pending
+    (let ((ran nil))
+      (cl-letf (((symbol-function 'signel--clipboard-image) (lambda () nil))
+                ((symbol-function 'signel-test--orig)
+                 (lambda (&optional arg) (interactive "P") (setq ran (list arg)))))
+        (let ((this-original-command 'signel-test--orig)
+              (current-prefix-arg '(4)))
+          (call-interactively #'signel-paste))
+        (should (equal ran '((4))))
+        (should-not signel--pending)))))
+
+(ert-deftest signel-paste-image-queues-not-inserts ()
+  (signel-test-with-pending
+    (signel--insert-msg "+15550009" "Bob" "hello" nil nil nil)
+    (let ((before (signel-test--history))
+          (ran nil))
+      (cl-letf (((symbol-function 'signel--clipboard-image)
+                 (lambda () (cons 'png signel-test--png-bytes)))
+                ((symbol-function 'signel-test--orig)
+                 (lambda () (interactive) (setq ran t))))
+        (goto-char (point-min))
+        (let ((this-original-command 'signel-test--orig))
+          (call-interactively #'signel-paste)))
+      (should-not ran)
+      (should (= 1 (length signel--pending)))
+      (should (string-match-p "\\`clipboard-[0-9]\\{8\\}-[0-9]\\{6\\}\\.png\\'"
+                              (plist-get (car signel--pending) :name)))
+      (should (equal (plist-get (car signel--pending) :bytes) signel-test--png-bytes))
+      (should (equal (signel-test--history) before)))))
+
+(ert-deftest signel-paste-respects-evil-register ()
+  (signel-test-with-pending
+    (let ((ran nil))
+      (cl-letf (((symbol-function 'signel--clipboard-image)
+                 (lambda () (cons 'png signel-test--png-bytes)))
+                ((symbol-function 'signel-test--orig)
+                 (lambda () (interactive) (setq ran t))))
+        (let ((this-original-command 'signel-test--orig)
+              (evil-this-register ?a))
+          (call-interactively #'signel-paste)))
+      (should ran)
+      (should-not signel--pending))))
+
+(defmacro signel-test-with-clipboard-tools (tools output status &rest body)
+  "Run BODY with only TOOLS on PATH; the stub `call-process' emits OUTPUT.
+Bind `calls' to the recorded (PROGRAM . ARGS), most recent first."
+  (declare (indent 3))
+  `(let ((calls nil)
+         (window-system nil))
+     (cl-letf (((symbol-function 'executable-find)
+                (lambda (p &rest _) (and (member p ,tools) (concat "/x/" p))))
+               ((symbol-function 'call-process)
+                (lambda (program &optional _infile buffer _display &rest args)
+                  (push (cons program args) calls)
+                  (should (equal buffer '(t nil)))
+                  (should-not enable-multibyte-characters)
+                  (insert ,output)
+                  ,status)))
+       ,@body)))
+
+(ert-deftest signel-clipboard-image-tries-sources-in-order ()
+  (let ((system-type 'darwin))
+    (signel-test-with-clipboard-tools '("pngpaste") signel-test--png-bytes 0
+      (should (equal (signel--clipboard-image) (cons 'png signel-test--png-bytes)))
+      (should (equal calls '(("pngpaste" "-"))))))
+  (let ((system-type 'gnu/linux)
+        (process-environment (cons "WAYLAND_DISPLAY=wayland-0" process-environment)))
+    (signel-test-with-clipboard-tools '("wl-paste" "xclip") signel-test--png-bytes 0
+      (should (equal (signel--clipboard-image) (cons 'png signel-test--png-bytes)))
+      (should (equal calls '(("wl-paste" "--no-newline" "--type" "image/png"))))))
+  (let ((system-type 'gnu/linux)
+        (process-environment (cons "WAYLAND_DISPLAY" process-environment)))
+    (signel-test-with-clipboard-tools '("xclip") signel-test--png-bytes 0
+      (should (equal (signel--clipboard-image) (cons 'png signel-test--png-bytes)))
+      (should (equal calls '(("xclip" "-selection" "clipboard" "-t" "image/png" "-o")))))))
+
+(ert-deftest signel-clipboard-image-ignores-non-image ()
+  (let ((system-type 'darwin))
+    (signel-test-with-clipboard-tools '("pngpaste") "just some text" 0
+      (should-not (signel--clipboard-image)))
+    (signel-test-with-clipboard-tools '("pngpaste") signel-test--png-bytes 1
+      (should-not (signel--clipboard-image)))
+    (signel-test-with-clipboard-tools '() signel-test--png-bytes 0
+      (should-not (signel--clipboard-image))
+      (should-not calls))
+    ;; Never signals.
+    (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) "/x/pngpaste"))
+              ((symbol-function 'call-process) (lambda (&rest _) (error "boom"))))
+      (let ((window-system nil))
+        (should-not (signel--clipboard-image))))))
+
+(ert-deftest signel-attach-file-queues ()
+  (signel-test-with-pending
+    (let ((file (signel-test--fixture signel-test--png-bytes ".png"))
+          (sent nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'signel--send-rpc)
+                     (lambda (&rest _) (setq sent t) 1)))
+            (signel-attach-file file)
+            (should-not sent)
+            (should (= 1 (length signel--pending)))
+            (should (equal (plist-get (car signel--pending) :name)
+                           (file-name-nondirectory file)))
+            (should (eq (plist-get (car signel--pending) :image-type) 'png)))
+        (delete-file file)))))
+
+(ert-deftest signel-remove-pending-last-and-all ()
+  (signel-test-with-pending
+    (should-error (signel-remove-pending) :type 'user-error)
+    (signel--add-pending (signel--make-attachment "a.txt" "a"))
+    (signel--add-pending (signel--make-attachment "b.txt" "b"))
+    (signel--add-pending (signel--make-attachment "c.txt" "c"))
+    (should (equal (mapcar (lambda (a) (plist-get a :name)) signel--pending)
+                   '("a.txt" "b.txt" "c.txt")))
+    (should (string-match-p "\\[a.txt\\].*\\[c.txt\\]"
+                            (overlay-get signel--pending-overlay 'before-string)))
+    (signel-remove-pending)
+    (should (equal (mapcar (lambda (a) (plist-get a :name)) signel--pending)
+                   '("a.txt" "b.txt")))
+    (signel-remove-pending t)
+    (should-not signel--pending)
+    (should-not (overlay-get signel--pending-overlay 'before-string))
+    (should-error (signel-remove-pending) :type 'user-error)))
+
+(ert-deftest signel-pending-row-shows-name-thumbnail-and-warning ()
+  (signel-test-with-pending
+    (let ((signel--contacts (make-hash-table :test 'equal)))
+      (puthash "+15550009" '(:name "Alice") signel--contacts)
+      (cl-letf (((symbol-function 'signel--clean-attachment)
+                 (lambda (att) (plist-put (copy-sequence att) :clean nil))))
+        (signel--add-pending (signel--make-attachment "p.png" signel-test--png-bytes)))
+      (let ((s (overlay-get signel--pending-overlay 'before-string)))
+        (should (string-prefix-p "To Alice: " s))
+        (should (string-suffix-p "\n" s))
+        (should (string-match-p "⚠ metadata not removed" s))
+        (let ((img (get-text-property (length "To Alice: ") 'display s)))
+          (should (eq (car img) 'image)))))))
+
+(ert-deftest signel-pending-row-group-name ()
+  (let ((signel--groups (make-hash-table :test 'equal)))
+    (puthash "GROUPID==" "Rowers" signel--groups)
+    (cl-letf (((symbol-function 'signel--clean-attachment)
+               (lambda (att) (plist-put (copy-sequence att) :clean t))))
+      (signel-test-with-chat "GROUPID=="
+        (signel--add-pending (signel--make-attachment "a.txt" "a"))
+        (should (string-prefix-p "To Rowers: [a.txt]"
+                                 (overlay-get signel--pending-overlay 'before-string)))))))
+
+(ert-deftest signel-pending-row-survives-incoming-message ()
+  (signel-test-with-pending
+    (signel--add-pending (signel--make-attachment "a.txt" "a"))
+    (goto-char (point-max))
+    (insert "caption")
+    (signel--insert-msg "+15550009" "Bob" "hi" nil nil nil)
+    (let ((ov signel--pending-overlay))
+      (should (eq (overlay-buffer ov) (current-buffer)))
+      (should (= (overlay-start ov) (- signel--input-marker (length signel-prompt))))
+      (should (string-match-p "To " (overlay-get ov 'before-string))))
+    (should (equal (buffer-substring-no-properties signel--input-marker (point-max))
+                   "caption"))))
+
+(ert-deftest signel-chat-mode-map-bindings ()
+  (should (eq (lookup-key signel-chat-mode-map (kbd "RET")) #'signel--send-input))
+  (should (eq (lookup-key signel-chat-mode-map (kbd "C-c C-c")) #'signel--send-input))
+  (should (eq (lookup-key signel-chat-mode-map (kbd "C-c C-a")) #'signel-attach-file))
+  (should (eq (lookup-key signel-chat-mode-map (kbd "C-c C-k")) #'signel-remove-pending))
+  (should (eq (lookup-key signel-chat-mode-map [remap yank]) #'signel-paste))
+  (should (eq (lookup-key signel-chat-mode-map [remap evil-paste-after]) #'signel-paste))
+  (should (eq (lookup-key signel-chat-mode-map [remap evil-paste-before]) #'signel-paste)))
