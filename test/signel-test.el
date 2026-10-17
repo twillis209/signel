@@ -463,8 +463,12 @@ Each entry is (FUNCTION . ARGS), most recent first."
     (should (eq (signel--image-action 'webp t t) 'inline))      ; WebP sticker from contact
     (should (eq (signel--image-action 'png nil nil) 'button))   ; stranger
     (should (eq (signel--image-action 'webp nil t) 'button))
-    (should (eq (signel--image-action nil t nil) 'file)))
+    (should (eq (signel--image-action nil t nil) 'file))
+    (should (eq (signel--image-action 'postscript t nil) 'file))  ; never rendered
+    (should (eq (signel--image-action 'postscript t t) 'file))
+    (should (eq (signel--image-action 'postscript nil nil) 'file)))
   (let ((signel-auto-display-images nil))
+    (should (eq (signel--image-action 'postscript t nil) 'file))
     (should (eq (signel--image-action 'png t nil) 'button))
     (should (eq (signel--image-action 'webp t t) 'button))
     (should (eq (signel--image-action nil t nil) 'file))))

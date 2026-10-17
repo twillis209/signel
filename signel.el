@@ -700,8 +700,9 @@ The MIME type and file name are ignored."
 (defun signel--image-action (sniffed-type known-p sticker-p)
   "Decide how to show media of SNIFFED-TYPE.
 KNOWN-P is non-nil if the sender is a known contact; STICKER-P is non-nil
-for stickers.  Return `inline', `button' or `file'."
-  (cond ((null sniffed-type) 'file)
+for stickers.  Return `inline', `button' or `file'.  PostScript is
+always `file': rendering it would run Ghostscript."
+  (cond ((memq sniffed-type '(nil postscript)) 'file)
         ((not signel-auto-display-images) 'button)
         ((and known-p (memq sniffed-type '(png jpeg gif))) 'inline)
         ((and known-p sticker-p (eq sniffed-type 'webp)) 'inline)
