@@ -442,9 +442,10 @@ RESULT and ERROR is nil."
   (unless (get-process signel--process-name)
     (error "Signel service not running. M-x signel-start"))
   (let* ((id (cl-incf signel--rpc-id-counter))
+         ;; Parameter-less methods omit `params' rather than send null.
          (req `((jsonrpc . "2.0")
                 (method . ,method)
-                (params . ,params)
+                ,@(and params `((params . ,params)))
                 (id . ,id)))
          (json-str (json-encode req)))
     (when target-buffer
