@@ -963,7 +963,7 @@ Return the output bytes on exit status 0, else nil."
           (set-buffer-multibyte nil)
           (insert bytes)
           (when (eq 0 (apply #'call-process-region
-                             (point-min) (point-max) program t t nil args))
+                             (point-min) (point-max) program t (list t nil) nil args))
             (buffer-string)))))))
 
 (defun signel--sniff-bytes (bytes)

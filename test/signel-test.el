@@ -994,6 +994,8 @@ fixture file name."
 (defconst signel-test--jpeg-bytes (unibyte-string #xff #xd8 #xff #xe0 0 #x10 ?J ?F ?I ?F 0))
 (defconst signel-test--tiff-bytes (unibyte-string ?I ?I 42 0 8 0 0 0))
 
+(defvar signel-test--magick-buffer nil "BUFFER argument last passed to the stubbed `call-process-region'.")
+
 (defmacro signel-test-with-magick (result-bytes status &rest body)
   "Run BODY with ImageMagick stubbed; bind `calls' to recorded (PROGRAM . ARGS).
 The stub replaces the buffer with RESULT-BYTES and returns STATUS."
@@ -1004,6 +1006,7 @@ The stub replaces the buffer with RESULT-BYTES and returns STATUS."
                ((symbol-function 'call-process-region)
                 (lambda (start end program &optional delete buffer display &rest args)
                   (push (cons program args) calls)
+                  (setq signel-test--magick-buffer buffer)
                   (should (not enable-multibyte-characters))
                   (delete-region start end)
                   (insert ,result-bytes)
@@ -1017,6 +1020,8 @@ The stub replaces the buffer with RESULT-BYTES and returns STATUS."
       (let ((out (signel--clean-attachment orig)))
         (should (equal (car calls) '("magick" "jpeg:-" "-auto-orient" "-strip" "jpeg:-")))
         (should (plist-get out :clean))
+        ;; stderr must be discarded, not merged into the image bytes
+        (should (equal signel-test--magick-buffer '(t nil)))
         (should (equal (plist-get out :bytes) new-bytes))
         (should-not (plist-get orig :clean))
         (should-not (eq out orig))))))
