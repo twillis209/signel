@@ -870,3 +870,13 @@ fixture file name."
                        "my draft"))
         (should-not (string-match-p "<Me>" (buffer-string)))))
     (should-not sent)))
+
+(ert-deftest signel-sticker-emoji-is-sanitised ()
+  (cl-letf (((symbol-function 'signel--find-sticker) (lambda (&rest _) nil)))
+    (with-temp-buffer
+      (signel--insert-sticker '((packId . "p") (stickerId . 1) (emoji . "x‮\ny")))
+      (should (string-match-p "\\[Sticker xy\\]" (buffer-string)))
+      (should-not (string-match-p "‮" (buffer-string))))
+    (with-temp-buffer
+      (signel--insert-sticker '((packId . "p") (stickerId . 1)))
+      (should (string-match-p "\\[Sticker 🧩\\]" (buffer-string))))))

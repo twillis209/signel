@@ -777,7 +777,10 @@ MAX-WIDTH and STICKER-P are passed to `signel--show-image'."
 KNOWN-P is non-nil if the sender is a known contact."
   (let* ((pack-id (alist-get 'packId sticker))
          (sticker-id (alist-get 'stickerId sticker))
-         (emoji (or (alist-get 'emoji sticker) "🧩"))
+         (emoji (let ((e (alist-get 'emoji sticker)))
+                  (if (and (stringp e) (not (string-empty-p e)))
+                      (signel--sanitize-name e)
+                    "🧩")))
          (file (if (and pack-id sticker-id)
                    (signel--find-sticker pack-id sticker-id)
                  nil))
