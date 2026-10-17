@@ -880,3 +880,9 @@ fixture file name."
     (with-temp-buffer
       (signel--insert-sticker '((packId . "p") (stickerId . 1)))
       (should (string-match-p "\\[Sticker 🧩\\]" (buffer-string))))))
+
+(ert-deftest signel-display-name-group-contact-without-number-shows-uuid ()
+  (let ((signel--contacts (make-hash-table :test 'equal)))
+    (puthash "abcdef12-3456" '(:name "Mum" :blocked nil) signel--contacts)
+    (should (equal (signel--display-name nil "abcdef12-3456" "x" t) "Mum (abcdef12)"))
+    (should (equal (signel--display-name nil "abcdef12-3456" "x" nil) "Mum"))))

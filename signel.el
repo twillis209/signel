@@ -251,16 +251,17 @@ items (never as script text).  Elsewhere use D-Bus when available."
   "Return a trustworthy label for a sender.
 Use the address-book name for NUMBER or UUID if there is one (plus
 the number when GROUP-P).  Otherwise show the sanitised PROFILE-NAME
-with NUMBER, or the first 8 characters of UUID when there is no number."
+with NUMBER.  The first 8 characters of UUID stand in for a missing
+number."
   (let* ((entry (or (and number (gethash number signel--contacts))
                     (and uuid (gethash uuid signel--contacts))))
-         (name (plist-get entry :name)))
+         (name (plist-get entry :name))
+         (id (cond (number number)
+                   (uuid (substring uuid 0 (min 8 (length uuid))))
+                   (t "?"))))
     (if (and (stringp name) (not (string-empty-p name)))
-        (if (and group-p number) (format "%s (%s)" name number) name)
-      (format "%s (%s)" (signel--sanitize-name profile-name)
-              (cond (number number)
-                    (uuid (substring uuid 0 (min 8 (length uuid))))
-                    (t "?"))))))
+        (if group-p (format "%s (%s)" name id) name)
+      (format "%s (%s)" (signel--sanitize-name profile-name) id))))
 
 (defvar signel--active-chats (make-hash-table :test 'equal)
   "Set of currently active chat IDs.")
