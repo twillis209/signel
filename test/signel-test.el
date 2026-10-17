@@ -840,3 +840,12 @@ fixture file name."
     (should-not (string-match-p "params" (cadr sent)))
     (should (string-match-p "\"method\":\"listContacts\"" (cadr sent)))
     (should (string-match-p "\"params\":{\"message\":\"hi\"}" (car sent)))))
+
+(ert-deftest signel-chat-mode-isolates-bidi-per-line ()
+  (signel-test-with-chat "+15550010"
+    (should (local-variable-p 'bidi-paragraph-start-re))
+    (should (equal bidi-paragraph-start-re "^"))
+    (should (local-variable-p 'bidi-paragraph-separate-re))
+    (should (equal bidi-paragraph-separate-re "^"))
+    (should (local-variable-p 'bidi-paragraph-direction))
+    (should (eq bidi-paragraph-direction 'left-to-right))))

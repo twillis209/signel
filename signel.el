@@ -913,6 +913,11 @@ KNOWN-P is non-nil if the sender is a known contact; see
 (define-derived-mode signel-chat-mode fundamental-mode "Signel"
   "Major mode for Signal chats."
   (setq-local paragraph-start (regexp-quote signel-prompt))
+  ;; Every line is its own left-to-right bidi paragraph, so an
+  ;; unterminated override in one message cannot reverse later lines.
+  (setq-local bidi-paragraph-start-re "^")
+  (setq-local bidi-paragraph-separate-re "^")
+  (setq-local bidi-paragraph-direction 'left-to-right)
   (visual-line-mode 1)
 
   ;; Setup Input Marker
