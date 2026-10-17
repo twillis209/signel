@@ -797,6 +797,18 @@ always `file': rendering it would run Ghostscript."
     (insert-file-contents-literally file)
     (cons (signel--sniff-image-buffer) (buffer-string))))
 
+(defun signel--insert-image-data (data type max-width)
+  "Insert the image DATA of TYPE at point, at most MAX-WIDTH pixels wide.
+Animation stops after `signel-animation-max-time' seconds.
+Return non-nil if an image was inserted."
+  (let ((image (create-image data type t :max-width max-width)))
+    (when image
+      (insert-image image)
+      (when (and signel-enable-animation (fboundp 'image-animate)
+                 (image-multi-frame-p image))
+        (image-animate image nil signel-animation-max-time))
+      t)))
+
 (defun signel--render-image (file expected-type max-width sticker-p)
   "Insert the image in FILE at point, at most MAX-WIDTH pixels wide.
 The bytes are read once and decoded from memory with their sniffed type.
@@ -818,13 +830,7 @@ Return non-nil if an image was inserted."
                     (setq type 'gif
                           data (cdr converted))))
               (when (file-exists-p gif) (delete-file gif))))))
-      (let ((image (create-image data type t :max-width max-width)))
-        (when image
-          (insert-image image)
-          (when (and signel-enable-animation (fboundp 'image-animate)
-                     (image-multi-frame-p image))
-            (image-animate image nil signel-animation-max-time))
-          t)))))
+      (signel--insert-image-data data type max-width))))
 
 (defun signel--show-image (button file max-width sticker-p)
   "Replace BUTTON with the image in FILE, as the owner asked.
@@ -1090,7 +1096,24 @@ On macOS, mark it quarantined first so Gatekeeper checks it."
 
 (defun signel--insert-attachment (att &optional known-p)
   "Insert a button or inline image for the attachment ATT at point.
-KNOWN-P is non-nil if the sender is a known contact."
+KNOWN-P is non-nil if the sender is a known contact.
+An ATT of the form ((signel-local . PLIST)) is one of the owner's own
+sends, shown from memory: a sniffed image inline, anything else as a
+plain label (there is no file to open)."
+  (if (assq 'signel-local att)
+      (signel--insert-local-attachment (alist-get 'signel-local att))
+    (signel--insert-received-attachment att known-p)))
+
+(defun signel--insert-local-attachment (plist)
+  "Insert the owner's own attachment PLIST at point."
+  (unless (and (memq (plist-get plist :image-type) '(png jpeg gif webp))
+               (signel--insert-image-data (plist-get plist :bytes)
+                                          (plist-get plist :image-type) 400))
+    (insert (format "[File: %s]" (signel--sanitize-name (plist-get plist :name))))))
+
+(defun signel--insert-received-attachment (att known-p)
+  "Insert a button or inline image for the signal-cli attachment ATT.
+KNOWN-P is as for `signel--insert-attachment'."
   (let* ((path (alist-get 'storedFilename att))
          (type (alist-get 'contentType att))
          (name (or (alist-get 'filename att) "attachment")))

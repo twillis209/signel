@@ -1318,3 +1318,29 @@ Bind `calls' to the recorded (PROGRAM . ARGS), most recent first."
         (cl-letf (((symbol-function 'gui-get-selection) (lambda (&rest _) "café")))
           (should (equal (signel--clipboard-image) (cons 'png signel-test--png-bytes)))
           (should (equal calls '(("pngpaste" "-")))))))))
+
+(ert-deftest signel-own-image-renders-from-memory ()
+  (let ((att (signel--make-attachment "p.png" (concat signel-test--png "body")))
+        (signel-enable-animation t))
+    (signel-test-with-chat "+441"
+      (signel-test--with-image-stubs calls
+        (signel--insert-msg "+441" "Me" nil (list `((signel-local . ,att))) nil t)
+        (let ((c (car (signel-test--called calls 'create-image))))
+          (should c)
+          (should (equal (nth 1 c) (plist-get att :bytes)))
+          (should (eq (nth 2 c) 'png))
+          (should (eq (nth 3 c) t))
+          (should (equal (plist-get (nthcdr 4 c) :max-width) 400)))
+        (should (signel-test--called calls 'insert-image))
+        (should (signel-test--called calls 'image-animate))
+        (should (string-match-p "<IMG>" (buffer-string)))))))
+
+(ert-deftest signel-own-file-is-plain-label ()
+  (let ((att (signel--make-attachment "r.pdf" "%PDF-1.7")))
+    (signel-test-with-chat "+441"
+      (signel-test--with-image-stubs calls
+        (signel--insert-msg "+441" "Me" nil (list `((signel-local . ,att))) nil t)
+        (should-not calls)
+        (goto-char (point-min))
+        (should (search-forward "[File: r.pdf]" nil t))
+        (should-not (button-at (match-beginning 0)))))))
