@@ -67,7 +67,7 @@ For a basic configuration, place this in your ~user-init-file~
   ~M-x signel-dashboard~
 
 - Open a specific chat directly:
-  ~M-x signel-chat~
+  ~M-x signel-chat~ (complete on contact or group name, or type a +number)
 
 - Re-read the contact list from your phone (contacts show their saved names):
   ~M-x signel-refresh-contacts~

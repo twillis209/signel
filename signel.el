@@ -189,6 +189,9 @@ These are untrusted; see `signel--display-name'.")
   "Address-book entries keyed by both number and UUID.
 Each value is a plist (:name STRING :blocked BOOL).")
 
+(defvar signel--groups (make-hash-table :test 'equal)
+  "Sanitised names of groups we belong to, keyed by group ID.")
+
 (defvar signel--contacts-pending nil
   "Non-nil while incoming messages are queued awaiting the contact list.")
 
@@ -393,11 +396,20 @@ for `send', the recipient or group and attachment count are included."
              (signel--flush-receive-queue)))))
 
 (defun signel--request-contacts ()
-  "Send `listContacts'; load the reply and flush the receive queue."
-  (signel--send-rpc "listContacts" nil nil #'signel--contacts-reply))
+  "Send `listContacts' and `listGroups'.
+The contacts reply is loaded and then flushes the receive queue."
+  (signel--send-rpc "listContacts" nil nil #'signel--contacts-reply)
+  (condition-case err
+      (signel--send-rpc "listGroups" nil nil
+                        (lambda (result error-obj)
+                          (if error-obj
+                              (signel--log "listGroups failed: %s"
+                                           (alist-get 'message error-obj))
+                            (signel--load-groups result))))
+    (error (signel--log "listGroups failed: %s" err))))
 
 (defun signel-refresh-contacts ()
-  "Re-request the contact list from signal-cli."
+  "Re-request the contact and group lists from signal-cli."
   (interactive)
   (signel--request-contacts))
 
@@ -437,6 +449,49 @@ Names are sanitised.  Entries with no usable name or nickName are skipped."
       (when entry
         (when (stringp number) (puthash number entry signel--contacts))
         (when (stringp uuid) (puthash uuid entry signel--contacts))))))
+
+(defun signel--load-groups (result)
+  "Rebuild `signel--groups' from the `listGroups' RESULT.
+Only named groups we are a member of and haven't blocked are kept."
+  (clrhash signel--groups)
+  (seq-doseq (g result)
+    (let ((id (alist-get 'id g))
+          (name (alist-get 'name g)))
+      (when (and (stringp id) (stringp name)
+                 (eq (alist-get 'isMember g) t)
+                 (not (eq (alist-get 'isBlocked g) t)))
+        (let ((clean (signel--sanitize-name name)))
+          (unless (equal clean "?")
+            (puthash id clean signel--groups)))))))
+
+(defun signel--chat-candidates ()
+  "Return an alist of (LABEL . CHAT-ID) for unblocked contacts and groups."
+  (let ((ids (make-hash-table :test 'eq))
+        candidates)
+    ;; One contact is stored under both number and UUID; prefer the number.
+    (maphash (lambda (key entry)
+               (unless (or (plist-get entry :blocked)
+                           (and (gethash entry ids)
+                                (string-prefix-p "+" (gethash entry ids))))
+                 (puthash entry key ids)))
+             signel--contacts)
+    (maphash (lambda (entry id)
+               (push (cons (format "%s (%s)" (plist-get entry :name)
+                                   (if (string-prefix-p "+" id)
+                                       id
+                                     (substring id 0 (min 8 (length id)))))
+                           id)
+                     candidates))
+             ids)
+    (maphash (lambda (id name)
+               (push (cons (format "%s [group]" name) id) candidates))
+             signel--groups)
+    candidates))
+
+(defun signel--resolve-recipient (input)
+  "Return the chat ID for INPUT, a completion label or a raw number/ID."
+  (or (cdr (assoc input (signel--chat-candidates)))
+      (string-trim input)))
 
 (defun signel--known-contact-p (number uuid)
   "Return non-nil if NUMBER or UUID is an unblocked, named contact, or is us."
@@ -1144,8 +1199,14 @@ with the failure on partial delivery failure or an RPC error."
 
 ;;;###autoload
 (defun signel-chat (recipient)
-  "Open a chat buffer for RECIPIENT (phone number or group ID)."
-  (interactive "sSignal Recipient (+Phone): ")
+  "Open a chat buffer for RECIPIENT (phone number, UUID or group ID).
+Interactively, complete on contact and group names, or type a number."
+  (interactive
+   (let ((input (completing-read "Signal chat (name or +number): "
+                                 (signel--chat-candidates))))
+     (when (string-blank-p input)
+       (user-error "No recipient given"))
+     (list (signel--resolve-recipient input))))
   (let ((buffer (signel--get-buffer recipient)))
     (switch-to-buffer buffer)
     (message "Chat opened.")))
