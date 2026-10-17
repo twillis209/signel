@@ -342,3 +342,12 @@ Return the list of (RESULT ERROR) callback invocations."
                       (dataMessage . ((message . "hi")))
                       (typingMessage . ((action . "STARTED"))))))))
     (should (string-match-p "\\[" (format "%s" mode-line-process)))))
+
+(ert-deftest signel-insert-msg-partial-line-survives-next-message ()
+  (signel-test-with-chat "+441"
+    (ignore-errors (signel--insert-msg "+441" "X" nil "notalist" nil nil))
+    (signel--insert-msg "+441" "Y" "second" nil nil nil)
+    (let ((s (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p "<X>" s))
+      (should (string-match-p "<Y> second" s))
+      (should (string-suffix-p (concat "\n" signel-prompt) s)))))

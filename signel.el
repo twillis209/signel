@@ -746,6 +746,8 @@ point stays in the input area if it was there."
            (forward-line 0)
            (delete-region (point) (point-max))
            (unwind-protect (progn ,@body)
+             (goto-char (point-max))
+             (unless (bolp) (insert "\n"))
              (signel--draw-prompt)
              (when --sp-typed (insert --sp-typed))))
        (when --sp-in-input (goto-char (+ signel--input-marker --sp-offset))))))
