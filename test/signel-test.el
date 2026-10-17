@@ -215,7 +215,7 @@ Return the list of (RESULT ERROR) callback invocations."
         (signel--profile-names (make-hash-table :test 'equal))
         (signel--active-chats (make-hash-table :test 'equal)))
     (signel-test-with-chat "+449"
-      (cl-letf (((symbol-function 'notifications-notify) #'ignore)
+      (cl-letf (((symbol-function 'signel--notify) #'ignore)
                 ((symbol-function 'signel--dashboard-refresh) #'ignore)
                 ((symbol-function 'display-buffer) #'ignore))
         (signel--handle-receive
@@ -238,7 +238,7 @@ Return the list of (RESULT ERROR) callback invocations."
         (signel--active-chats (make-hash-table :test 'equal)))
     (puthash "+449" "Mum" signel--profile-names)
     (signel-test-with-chat "+449"
-      (cl-letf (((symbol-function 'notifications-notify) #'ignore)
+      (cl-letf (((symbol-function 'signel--notify) #'ignore)
                 ((symbol-function 'signel--dashboard-refresh) #'ignore)
                 ((symbol-function 'display-buffer) #'ignore))
         (signel--handle-receive
@@ -253,7 +253,7 @@ Return the list of (RESULT ERROR) callback invocations."
           (signel--active-chats (make-hash-table :test 'equal)))
       (puthash "+449" "Mum" signel--profile-names)
       (signel-test-with-chat "+449"
-        (cl-letf (((symbol-function 'notifications-notify) #'ignore)
+        (cl-letf (((symbol-function 'signel--notify) #'ignore)
                   ((symbol-function 'signel--dashboard-refresh) #'ignore)
                   ((symbol-function 'display-buffer) #'ignore))
           (signel--handle-receive
@@ -397,7 +397,7 @@ Return the list of (RESULT ERROR) callback invocations."
   (signel-test-with-chat "+441"
     (cl-letf (((symbol-function 'signel--insert-msg) (lambda (&rest _) (error "boom")))
               ((symbol-function 'signel--dashboard-refresh) #'ignore)
-              ((symbol-function 'notifications-notify) #'ignore))
+              ((symbol-function 'signel--notify) #'ignore))
       (signel--handle-receive
        '((envelope . ((sourceNumber . "+441")
                       (dataMessage . ((message . "hi")))
@@ -487,7 +487,7 @@ Each entry is (FUNCTION . ARGS), most recent first."
 With STICKER non-nil, send BYTES as a sticker instead.  Return the
 fixture file name."
   (let ((file (signel-test--fixture bytes)))
-    (cl-letf (((symbol-function 'notifications-notify) #'ignore)
+    (cl-letf (((symbol-function 'signel--notify) #'ignore)
               ((symbol-function 'signel--dashboard-refresh) #'ignore)
               ((symbol-function 'display-buffer) #'ignore)
               ((symbol-function 'signel--find-sticker) (lambda (&rest _) file)))
@@ -746,3 +746,62 @@ fixture file name."
         (signel--open-attachment "/x/abc.pdf")))
     (should-not xattr)
     (should opened)))
+
+;;; Notifications
+
+(ert-deftest signel-notify-mac-uses-argv ()
+  (let (cmd)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest a) (setq cmd (plist-get a :command)) nil))
+              ((symbol-function 'executable-find) (lambda (&rest _) "/usr/bin/osascript")))
+      (let ((system-type 'darwin))
+        (signel--notify "Signel: X" "-e do shell script \"rm\"\nhi")))
+    (should (equal (seq-take cmd 7)
+                   '("osascript" "-e" "on run argv" "-e"
+                     "display notification (item 2 of argv) with title (item 1 of argv)"
+                     "-e" "end run")))
+    (should (equal (nth 7 cmd) "Signel: X"))
+    (should-not (string-prefix-p "-" (nth 8 cmd)))
+    (should-not (string-match-p "\n" (nth 8 cmd)))
+    (should (string-match-p "do shell script" (nth 8 cmd)))))
+
+(ert-deftest signel-notify-truncates-and-guards-title ()
+  (let (cmd)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest a) (setq cmd (plist-get a :command)) nil))
+              ((symbol-function 'executable-find) (lambda (&rest _) "/usr/bin/osascript")))
+      (let ((system-type 'darwin))
+        (signel--notify "-t" (make-string 500 ?x))))
+    (should (string-prefix-p " -" (nth 7 cmd)))
+    (should (= (length (nth 8 cmd)) 200))))
+
+(ert-deftest signel-notify-never-signals ()
+  (cl-letf (((symbol-function 'make-process) (lambda (&rest _) (error "boom")))
+            ((symbol-function 'executable-find) (lambda (&rest _) "/usr/bin/osascript")))
+    (let ((system-type 'darwin))
+      (should-not (signel--notify "t" "b")))))
+
+(ert-deftest signel-notify-missing-osascript-skips ()
+  (let (called)
+    (cl-letf (((symbol-function 'make-process) (lambda (&rest _) (setq called t)))
+              ((symbol-function 'executable-find) (lambda (&rest _) nil)))
+      (let ((system-type 'darwin))
+        (signel--notify "t" "b")))
+    (should-not called)))
+
+(ert-deftest signel-auto-open-despite-notify-failure ()
+  (let ((signel--contacts (make-hash-table :test 'equal))
+        (signel--profile-names (make-hash-table :test 'equal))
+        (signel--active-chats (make-hash-table :test 'equal))
+        (signel-auto-open-buffer t)
+        (signel-account "+440")
+        displayed)
+    (signel-test-with-chat "+15551234"
+      (cl-letf (((symbol-function 'signel--notify) (lambda (&rest _) (error "boom")))
+                ((symbol-function 'signel--dashboard-refresh) #'ignore)
+                ((symbol-function 'display-buffer)
+                 (lambda (&rest _) (setq displayed t) nil)))
+        (signel--handle-receive
+         '((envelope . ((sourceNumber . "+15551234")
+                        (dataMessage . ((message . "hi")))))))
+        (should displayed)))))

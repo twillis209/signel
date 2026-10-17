@@ -47,7 +47,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'seq)
-(require 'notifications)
+(require 'notifications nil t)
 (require 'button)
 (require 'image)
 
@@ -175,6 +175,43 @@ Each value is a plist (:name STRING :blocked BOOL).")
                  "" (if (stringp string) string "")))
          (trimmed (string-trim clean)))
     (if (string-empty-p trimmed) "?" trimmed)))
+
+(declare-function notifications-notify "notifications" (&rest params))
+
+(defun signel--notify-arg (string)
+  "Return STRING made safe as an osascript argv item.
+Sanitise, truncate to 200 characters, and prefix a space if it starts
+with \"-\" so it cannot be parsed as an option."
+  (let ((clean (signel--sanitize-name string)))
+    (when (> (length clean) 200) (setq clean (substring clean 0 200)))
+    (if (string-prefix-p "-" clean) (concat " " clean) clean)))
+
+(defun signel--notify (title body)
+  "Show a desktop notification with TITLE and BODY.  Never signals.
+On macOS run `osascript' asynchronously with TITLE and BODY as argv
+items (never as script text).  Elsewhere use D-Bus when available."
+  (condition-case err
+      (cond
+       ((eq system-type 'darwin)
+        (if (not (executable-find "osascript"))
+            (signel--log "Notification skipped: osascript not found")
+          (make-process
+           :name "signel-notify"
+           :command (list "osascript"
+                          "-e" "on run argv"
+                          "-e" "display notification (item 2 of argv) with title (item 1 of argv)"
+                          "-e" "end run"
+                          (signel--notify-arg title)
+                          (signel--notify-arg body))
+           :connection-type 'pipe
+           :noquery t
+           :buffer nil
+           :sentinel #'ignore)))
+       ((and (featurep 'dbusbind) (fboundp 'notifications-notify))
+        (notifications-notify :title (signel--sanitize-name title)
+                              :body (signel--sanitize-name body))))
+    (error (signel--log "Notification failed: %s" (error-message-string err))
+           nil)))
 
 (defun signel--mode-line-escape (string)
   "Escape `%' in STRING for use in the mode line."
@@ -508,13 +545,16 @@ Output is split into lines first; a line longer than
                   (signel--insert-msg chat-id sender msg-text attachments sticker nil
                                       (signel--known-contact-p source-number source-uuid))
 
-                  ;; Notify
-                  (let ((notify-body (cond (msg-text msg-text)
-                                           (sticker "[Sticker]")
-                                           (attachments "[Attachment]")
-                                           (t "New Message"))))
-                    (notifications-notify :title (format "Signel: %s" sender)
-                                          :body notify-body))
+                  ;; Notify (never signals)
+                  (condition-case nerr
+                      (signel--notify
+                       (format "Signel: %s" sender)
+                       (cond (msg-text msg-text)
+                             (sticker "[Sticker]")
+                             (attachments "[Attachment]")
+                             (t "New Message")))
+                    (error (signel--log "Notify failed: %s"
+                                        (error-message-string nerr))))
 
                   (when signel-auto-open-buffer
                     (display-buffer (signel--get-buffer chat-id))))))
