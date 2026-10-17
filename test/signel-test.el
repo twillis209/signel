@@ -182,3 +182,18 @@ Return the list of (RESULT ERROR) callback invocations."
                         (dataMessage . ((message . "hi")))))))
         (should (string-match-p "Mum (\\+449)" (buffer-string)))
         (should (equal (gethash "+449" signel--profile-names) "Mum"))))))
+(ert-deftest signel-receive-control-only-source-name-keeps-cached-name ()
+  (dolist (junk '("‎" "\x01" " ‮\t"))
+    (let ((signel--contacts (make-hash-table :test 'equal))
+          (signel--profile-names (make-hash-table :test 'equal))
+          (signel--active-chats (make-hash-table :test 'equal)))
+      (puthash "+449" "Mum" signel--profile-names)
+      (signel-test-with-chat "+449"
+        (cl-letf (((symbol-function 'notifications-notify) #'ignore)
+                  ((symbol-function 'signel--dashboard-refresh) #'ignore)
+                  ((symbol-function 'display-buffer) #'ignore))
+          (signel--handle-receive
+           `((envelope . ((sourceNumber . "+449") (sourceName . ,junk)
+                          (dataMessage . ((message . "hi")))))))
+          (should (string-match-p "Mum (\\+449)" (buffer-string)))
+          (should (equal (gethash "+449" signel--profile-names) "Mum")))))))
