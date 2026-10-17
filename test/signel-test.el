@@ -952,3 +952,39 @@ fixture file name."
       (signel--request-contacts))
     (should (member "listContacts" methods))
     (should (member "listGroups" methods))))
+
+(ert-deftest signel-make-attachment-sniffs-and-maps-mime ()
+  (let ((att (signel--make-attachment "x.dat" (unibyte-string #x89 ?P ?N ?G ?\r ?\n #x1a ?\n))))
+    (should (eq (plist-get att :image-type) 'png))
+    (should (equal (plist-get att :mime) "image/png"))))
+
+(ert-deftest signel-make-attachment-non-image-uses-extension ()
+  (should (equal (plist-get (signel--make-attachment "r.pdf" "%PDF-1.7") :mime) "application/pdf"))
+  (should (equal (plist-get (signel--make-attachment "r.zzz" "abc") :mime) "application/octet-stream")))
+
+(ert-deftest signel-attachment-data-uri-is-well-formed ()
+  (let ((uri (signel--attachment-data-uri
+              (signel--make-attachment "a;b,c%d Zo\u00eb.txt" "hi"))))
+    (should (string-prefix-p "data:text/plain;filename=" uri))
+    (should (string-suffix-p ";base64,aGk=" uri))
+    ;; exactly one comma, and no extra ';' before ";base64"
+    (should (= 1 (cl-count ?, uri)))
+    (should (string-match-p "\\`data:[^;]+;filename=[^;,]+;base64," uri))))
+
+(ert-deftest signel-make-attachment-size-limit ()
+  (let ((signel-max-attachment-size 3))
+    (should-error (signel--make-attachment "x" "abcd") :type 'user-error)))
+
+(ert-deftest signel-make-attachment-strips-path-separators ()
+  (should (equal (plist-get (signel--make-attachment "/tmp/dir/a\\b.txt" "x") :name)
+                 "a_b.txt")))
+
+(ert-deftest signel-read-file-bytes-checks-size-first ()
+  (let ((f (make-temp-file "signel-att")))
+    (unwind-protect
+        (progn
+          (with-temp-file f (set-buffer-multibyte nil) (insert "abcd"))
+          (should (equal (signel--read-file-bytes f) "abcd"))
+          (let ((signel-max-attachment-size 3))
+            (should-error (signel--read-file-bytes f) :type 'user-error)))
+      (delete-file f))))

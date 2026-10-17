@@ -80,6 +80,8 @@
 (require 'notifications nil t)
 (require 'button)
 (require 'image)
+(require 'mailcap)
+(require 'url-util)
 
 ;;; Configuration
 
@@ -145,6 +147,10 @@ treated as a stranger."
 (defcustom signel-auto-open-buffer t
   "If non-nil, automatically display the chat buffer when a message arrives."
   :type 'boolean)
+
+(defcustom signel-max-attachment-size 104857600
+  "Largest outgoing attachment, in bytes (default 100 MB)."
+  :type 'integer)
 
 ;;; Faces
 
@@ -890,6 +896,54 @@ nothing, if FILE is not an image."
        (signel--insert-image-button "[Show image]" file 400 nil)
        t)
       (_ nil))))
+
+;;; Outgoing Attachments
+
+;; Attachments are held in memory as plists and sent to signal-cli as
+;; `data:' URIs, so nothing is written to disk.
+
+(defun signel--check-attachment-size (size)
+  "Signal a `user-error' if SIZE bytes exceeds `signel-max-attachment-size'."
+  (when (> size signel-max-attachment-size)
+    (user-error "Attachment is %d bytes, over the limit of %d (signel-max-attachment-size)"
+                size signel-max-attachment-size)))
+
+(defun signel--make-attachment (name bytes)
+  "Return an attachment plist for NAME and the unibyte string BYTES.
+Keys: :name :bytes :image-type :mime :clean.  The image type comes from
+BYTES, never from NAME.  Signal a `user-error' if BYTES is too large."
+  (signel--check-attachment-size (length bytes))
+  (let* ((clean-name (replace-regexp-in-string
+                      "[/\\\\]" "_"
+                      (signel--sanitize-name (file-name-nondirectory (or name "")))))
+         (type (with-temp-buffer
+                 (set-buffer-multibyte nil)
+                 (insert bytes)
+                 (signel--sniff-image-buffer)))
+         (ext (file-name-extension clean-name))
+         (mime (or (cdr (assq type '((png . "image/png") (jpeg . "image/jpeg")
+                                     (gif . "image/gif") (webp . "image/webp")
+                                     (heic . "image/heic"))))
+                   (and ext (mailcap-extension-to-mime ext))
+                   "application/octet-stream")))
+    (list :name clean-name :bytes bytes :image-type type :mime mime :clean nil)))
+
+(defun signel--attachment-data-uri (att)
+  "Return the signal-cli data URI for attachment plist ATT."
+  (format "data:%s;filename=%s;base64,%s"
+          (plist-get att :mime)
+          (url-hexify-string (plist-get att :name))
+          (base64-encode-string (plist-get att :bytes) t)))
+
+(defun signel--read-file-bytes (file)
+  "Return the contents of FILE as a unibyte string.
+Signal a `user-error' before reading if it exceeds the size limit."
+  (let ((size (file-attribute-size (file-attributes file))))
+    (when size (signel--check-attachment-size size)))
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (buffer-string)))
 
 ;;; Received files
 
