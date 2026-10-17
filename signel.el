@@ -81,6 +81,11 @@ When nil, only the first frame of animated media will be displayed."
   "The prompt string displayed in chat buffers."
   :type 'string)
 
+(defcustom signel-max-line-length 5000000
+  "Maximum length of a single line of signal-cli output.
+A longer line is dropped and logged; other lines are unaffected."
+  :type 'integer)
+
 (defcustom signel-auto-open-buffer t
   "If non-nil, automatically display the chat buffer when a message arrives."
   :type 'boolean)
@@ -109,7 +114,7 @@ When nil, only the first frame of animated media will be displayed."
   "Internal name for the signal-cli process.")
 
 (defconst signel--buffer-stderr " *signel-stderr*"
-  "Name of the hidden buffer used for process stderr.")
+  "Name of the hidden buffer that receives process stderr.")
 
 (defvar signel--rpc-id-counter 0
   "Counter for JSON-RPC request IDs.")
@@ -162,7 +167,9 @@ When nil, only the first frame of animated media will be displayed."
 
   (let ((proc (make-process
                :name signel--process-name
-               :buffer signel--buffer-stderr
+               :buffer nil
+               :connection-type 'pipe
+               :stderr (get-buffer-create signel--buffer-stderr)
                :command (list signel-cli-program "-a" signel-account "jsonRpc")
                :filter #'signel--process-filter
                :sentinel #'signel--process-sentinel
@@ -198,28 +205,40 @@ error handling."
 
 ;;; Parsing & Dispatch
 
-(defun signel--process-filter (_proc string)
-  "Accumulate output from process and parse complete JSON objects from STRING."
-  (setq signel--partial-line (concat signel--partial-line string))
-  ;; DoS Protection: Reset buffer if it gets suspiciously large without a newline
-  (when (> (length signel--partial-line) 100000)
-    (setq signel--partial-line "")
-    (signel--log "WARNING: Buffer overflow protection triggered. Dropped data."))
+(defun signel--split-lines (pending string)
+  "Append STRING to PENDING and split on newlines.
+Return (LINES . REMAINDER), where LINES is a list of complete lines
+without their newline and REMAINDER is the unterminated tail."
+  (let* ((parts (split-string (concat pending string) "\n"))
+         (remainder (car (last parts))))
+    (cons (butlast parts) remainder)))
 
-  (let ((lines (split-string signel--partial-line "\n")))
-    (if (string-suffix-p "\n" signel--partial-line)
-        (setq signel--partial-line "")
-      (setq signel--partial-line (car (last lines)))
-      (setq lines (butlast lines)))
+(defun signel--process-filter (_proc string)
+  "Accumulate output from process and parse complete JSON objects from STRING.
+Output is split into lines first; a line longer than
+`signel-max-line-length' is dropped on its own and never affects others."
+  (let* ((split (signel--split-lines signel--partial-line string))
+         (lines (car split))
+         (remainder (cdr split)))
+    ;; DoS protection: discard an unterminated tail that is already too long.
+    (if (> (length remainder) signel-max-line-length)
+        (progn
+          (setq signel--partial-line "")
+          (signel--log "WARNING: Unterminated line exceeds %d chars. Dropped."
+                       signel-max-line-length))
+      (setq signel--partial-line remainder))
 
     (dolist (line lines)
-      (setq line (string-trim line))
-      (when (and (not (string-empty-p line)) (string-prefix-p "{" line))
-        (signel--log "RECV: %s" line)
-        (condition-case err
-            (let ((json (json-read-from-string line)))
-              (signel--dispatch json))
-          (error (signel--log "JSON Error: %s" err)))))))
+      (if (> (length line) signel-max-line-length)
+          (signel--log "WARNING: Line of %d chars exceeds limit. Dropped."
+                       (length line))
+        (setq line (string-trim line))
+        (when (and (not (string-empty-p line)) (string-prefix-p "{" line))
+          (signel--log "RECV: %s" line)
+          (condition-case err
+              (let ((json (json-read-from-string line)))
+                (signel--dispatch json))
+            (error (signel--log "JSON Error: %s" err))))))))
 
 (defun signel--process-sentinel (_proc event)
   "Log process EVENT for debugging."
