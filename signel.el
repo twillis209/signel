@@ -965,10 +965,13 @@ then fall back to pngpaste (macOS), wl-paste (Wayland) or xclip.  The
 bytes must sniff as an image."
   (condition-case err
       (let ((check (lambda (data)
-                     (when (stringp data)
-                       (let* ((bytes (string-to-unibyte data))
-                              (type (signel--sniff-bytes bytes)))
-                         (and type (cons type bytes)))))))
+                     ;; A multibyte text selection fails `string-to-unibyte';
+                     ;; treat it as no image so the tools are still tried.
+                     (ignore-errors
+                       (when (stringp data)
+                         (let* ((bytes (string-to-unibyte data))
+                                (type (signel--sniff-bytes bytes)))
+                           (and type (cons type bytes))))))))
         (or (and (fboundp 'gui-get-selection) window-system
                  (funcall check (ignore-errors
                                   (gui-get-selection 'CLIPBOARD 'image/png))))
@@ -1257,6 +1260,9 @@ KNOWN-P is non-nil if the sender is a known contact; see
   '((png . "png") (jpeg . "jpg") (gif . "gif") (webp . "webp"))
   "File name extensions for clipboard image types.")
 
+(defconst signel--paste-commands '(yank evil-paste-after evil-paste-before)
+  "Commands `signel-paste' remaps, and runs when there is no image.")
+
 (defun signel-paste ()
   "Queue a clipboard image for this chat, or paste text as usual.
 If the clipboard holds an image (and no evil register was named), add
@@ -1266,11 +1272,12 @@ Otherwise run the command this one remaps, with the same prefix arg."
   (let ((image (and (not (bound-and-true-p evil-this-register))
                     (signel--clipboard-image))))
     (if (not image)
-        (call-interactively
-         (if (and this-original-command
-                  (not (eq this-original-command 'signel-paste)))
-             this-original-command
-           #'yank))
+        (let ((cmd (if (memq this-original-command signel--paste-commands)
+                       this-original-command
+                     #'yank)))
+          ;; So `last-command' is the paste, as `evil-paste-pop' requires.
+          (setq this-command cmd)
+          (call-interactively cmd))
       (signel--add-pending
        (signel--make-attachment
         (format "clipboard-%s.%s" (format-time-string "%Y%m%d-%H%M%S")
