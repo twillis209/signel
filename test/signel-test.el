@@ -197,3 +197,75 @@ Return the list of (RESULT ERROR) callback invocations."
                           (dataMessage . ((message . "hi")))))))
           (should (string-match-p "Mum (\\+449)" (buffer-string)))
           (should (equal (gethash "+449" signel--profile-names) "Mum")))))))
+
+;;; Task 4: contact list and start-up queue
+
+(ert-deftest signel-load-contacts-rules ()
+  (let ((signel--contacts (make-hash-table :test 'equal)))
+    (signel--load-contacts
+     (vector '((number . "+441") (uuid . "u1") (name . "Mum") (isBlocked . :json-false))
+             '((number . "+442") (uuid . "u2") (name . "Ex") (isBlocked . t))
+             '((number . "+443") (uuid . "u3") (name . nil) (nickName . nil))
+             '((number . nil) (uuid . "u4") (name . "") (nickName . "Bob") (isBlocked . :json-false))
+             '((number . "+445") (uuid . "u5") (name . "‮") (nickName . "Al‮") (isBlocked . :json-false))))
+    (should (signel--known-contact-p "+441" nil))
+    (should (signel--known-contact-p nil "u1"))
+    (should-not (signel--known-contact-p "+442" nil))
+    (should-not (signel--known-contact-p "+443" nil))
+    (should (signel--known-contact-p nil "u4"))
+    (should (equal (plist-get (gethash "+445" signel--contacts) :name) "Al"))
+    (should-not (signel--known-contact-p "+440" nil))
+    (let ((signel-account "+440")) (should (signel--known-contact-p "+440" nil)))))
+
+(defun signel-test--receive-json (n)
+  `((method . "receive") (params . ((n . ,n)))))
+
+(defmacro signel-test--with-waiting (var &rest body)
+  "Run BODY with receives queued and handled params collected in VAR."
+  (declare (indent 1))
+  `(let ((signel--contacts (make-hash-table :test 'equal))
+         (signel--rpc-callbacks (make-hash-table :test 'equal))
+         (signel--contacts-pending t)
+         (signel--receive-queue nil)
+         (signel--contacts-timer nil)
+         (,var nil))
+     (cl-letf (((symbol-function 'signel--handle-receive)
+                (lambda (p) (push (alist-get 'n p) ,var))))
+       ,@body)))
+
+(ert-deftest signel-receives-queued-until-contacts ()
+  (signel-test--with-waiting calls
+    (puthash 7 #'signel--contacts-reply signel--rpc-callbacks)
+    (signel--dispatch (signel-test--receive-json 1))
+    (signel--dispatch (signel-test--receive-json 2))
+    (should-not calls)
+    (signel--dispatch '((id . 7) (result . [((number . "+441") (name . "Mum"))])))
+    (should (equal (reverse calls) '(1 2)))
+    (should (signel--known-contact-p "+441" nil))
+    (signel--dispatch (signel-test--receive-json 3))
+    (should (equal (reverse calls) '(1 2 3)))))
+
+(ert-deftest signel-queue-flushes-on-contacts-error ()
+  (signel-test--with-waiting calls
+    (puthash 7 #'signel--contacts-reply signel--rpc-callbacks)
+    (signel--dispatch (signel-test--receive-json 1))
+    (signel--dispatch '((id . 7) (error . ((message . "boom")))))
+    (should (equal calls '(1)))
+    (should-not (signel--known-contact-p "+441" nil))))
+
+(ert-deftest signel-queue-flushes-on-timeout ()
+  (signel-test--with-waiting calls
+    (signel--dispatch (signel-test--receive-json 1))
+    (signel--dispatch (signel-test--receive-json 2))
+    (signel--flush-receive-queue)
+    (should (equal (reverse calls) '(1 2)))
+    (should-not signel--contacts-pending)))
+
+(ert-deftest signel-error-callback-runs-when-handle-error-signals ()
+  (let ((signel--rpc-callbacks (make-hash-table :test 'equal)) called)
+    (puthash 9 (lambda (_r e) (setq called e)) signel--rpc-callbacks)
+    (cl-letf (((symbol-function 'signel--handle-error)
+               (lambda (&rest _) (error "handler broke"))))
+      (ignore-errors
+        (signel--dispatch '((id . 9) (error . ((message . "x")))))))
+    (should called)))

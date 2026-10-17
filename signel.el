@@ -46,6 +46,7 @@
 (require 'json)
 (require 'cl-lib)
 (require 'subr-x)
+(require 'seq)
 (require 'notifications)
 (require 'button)
 (require 'image)
@@ -94,6 +95,12 @@ attachment count are logged, so message text, names and attachment
 paths never reach the log.  `data:' URIs are always shortened."
   :type 'boolean)
 
+(defcustom signel-contacts-timeout 5
+  "Seconds to hold incoming messages while waiting for the contact list.
+After this, queued messages are shown and everyone not yet known is
+treated as a stranger."
+  :type 'number)
+
 (defcustom signel-auto-open-buffer t
   "If non-nil, automatically display the chat buffer when a message arrives."
   :type 'boolean)
@@ -140,6 +147,15 @@ These are untrusted; see `signel--display-name'.")
 (defvar signel--contacts (make-hash-table :test 'equal)
   "Address-book entries keyed by both number and UUID.
 Each value is a plist (:name STRING :blocked BOOL).")
+
+(defvar signel--contacts-pending nil
+  "Non-nil while incoming messages are queued awaiting the contact list.")
+
+(defvar signel--receive-queue nil
+  "Queued `receive' params, newest first, awaiting the contact list.")
+
+(defvar signel--contacts-timer nil
+  "Timer that flushes `signel--receive-queue' if the contact list is slow.")
 
 (defun signel--sanitize-name (string)
   "Return STRING without control or bidi characters, trimmed, or \"?\"."
@@ -247,6 +263,12 @@ for `send', the recipient or group and attachment count are included."
   (setq signel--partial-line "")
   (clrhash signel--request-buffer-map)
   (clrhash signel--rpc-callbacks)
+  (clrhash signel--contacts)
+  (when (timerp signel--contacts-timer)
+    (cancel-timer signel--contacts-timer))
+  (setq signel--contacts-timer nil
+        signel--contacts-pending nil
+        signel--receive-queue nil)
 
   (let ((proc (make-process
                :name signel--process-name
@@ -259,7 +281,71 @@ for `send', the recipient or group and attachment count are included."
                :coding 'utf-8-unix)))
     (set-process-query-on-exit-flag proc nil)
     (signel--log "Signel service started.")
-    (message "Signel service started.")))
+    (message "Signel service started.")
+    ;; Queue incoming messages until the contact list is known.
+    (setq signel--contacts-pending t
+          signel--contacts-timer
+          (run-at-time signel-contacts-timeout nil
+                       #'signel--flush-receive-queue))
+    (condition-case err
+        (signel--request-contacts)
+      (error (signel--log "listContacts failed: %s" err)
+             (signel--flush-receive-queue)))))
+
+(defun signel--request-contacts ()
+  "Send `listContacts'; load the reply and flush the receive queue."
+  (signel--send-rpc "listContacts" nil nil #'signel--contacts-reply))
+
+(defun signel-refresh-contacts ()
+  "Re-request the contact list from signal-cli."
+  (interactive)
+  (signel--request-contacts))
+
+(defun signel--contacts-reply (result error-obj)
+  "Handle the `listContacts' reply RESULT or ERROR-OBJ, then flush the queue."
+  (unwind-protect
+      (unless error-obj (signel--load-contacts result))
+    (signel--flush-receive-queue)))
+
+(defun signel--flush-receive-queue ()
+  "Stop queueing incoming messages and handle those already queued, in order."
+  (when (timerp signel--contacts-timer)
+    (cancel-timer signel--contacts-timer))
+  (setq signel--contacts-timer nil
+        signel--contacts-pending nil)
+  (let ((queued (nreverse signel--receive-queue)))
+    (setq signel--receive-queue nil)
+    (dolist (params queued)
+      (condition-case err
+          (signel--handle-receive params)
+        (error (signel--log "Error handling queued message: %s" err))))))
+
+(defun signel--load-contacts (result)
+  "Rebuild `signel--contacts' from the `listContacts' RESULT.
+Names are sanitised.  Entries with no usable name or nickName are skipped."
+  (clrhash signel--contacts)
+  (seq-doseq (c result)
+    (let* ((number (alist-get 'number c))
+           (uuid (alist-get 'uuid c))
+           (name (seq-find (lambda (n) (not (equal n "?")))
+                           (mapcar (lambda (k)
+                                     (let ((v (alist-get k c)))
+                                       (and (stringp v) (signel--sanitize-name v))))
+                                   '(name nickName))))
+           (entry (and name (list :name name
+                                  :blocked (eq (alist-get 'isBlocked c) t)))))
+      (when entry
+        (when (stringp number) (puthash number entry signel--contacts))
+        (when (stringp uuid) (puthash uuid entry signel--contacts))))))
+
+(defun signel--known-contact-p (number uuid)
+  "Return non-nil if NUMBER or UUID is an unblocked, named contact, or is us."
+  (or (and number signel-account (equal number signel-account))
+      (let ((entry (or (and number (gethash number signel--contacts))
+                       (and uuid (gethash uuid signel--contacts)))))
+        (and entry
+             (not (plist-get entry :blocked))
+             (not (string-empty-p (or (plist-get entry :name) "")))))))
 
 (defun signel-stop ()
   "Stop the Signel service."
@@ -340,10 +426,14 @@ Output is split into lines first; a line longer than
         (id (alist-get 'id json))
         (params (alist-get 'params json)))
     (cond
-     ((equal method "receive") (signel--handle-receive params))
+     ((equal method "receive")
+      (if signel--contacts-pending
+          (push params signel--receive-queue)
+        (signel--handle-receive params)))
      (error-obj
-      (signel--handle-error id error-obj)
-      (signel--run-callback id nil error-obj))
+      ;; The callback must run even if reporting the error signals.
+      (unwind-protect (signel--handle-error id error-obj)
+        (signel--run-callback id nil error-obj)))
      ((and id (assq 'result json))
       (signel--run-callback id (alist-get 'result json) nil)))))
 
