@@ -352,6 +352,7 @@ for `send', the recipient or group and attachment count are included."
                :name signel--process-name
                :buffer nil
                :connection-type 'pipe
+               :noquery t
                :stderr (get-buffer-create signel--buffer-stderr)
                :command (list signel-cli-program "-a" signel-account "jsonRpc")
                :filter #'signel--process-filter
