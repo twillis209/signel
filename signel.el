@@ -739,6 +739,46 @@ nothing, if FILE is not an image."
        t)
       (_ nil))))
 
+;;; Received files
+
+(defun signel--file-label (name path)
+  "Return a button label for NAME, the sender's name for the file at PATH.
+NAME is sanitised; the extension shown is that of the on-disk PATH."
+  (let ((ext (file-name-extension path)))
+    (format "[File: %s (%s)]" (signel--sanitize-name name)
+            (if (and ext (not (string-empty-p ext)))
+                (concat "." (signel--sanitize-name ext))
+              "no extension"))))
+
+(defun signel--open-attachment (path)
+  "Open the received file PATH after asking for confirmation.
+On macOS, mark it quarantined first so Gatekeeper checks it."
+  (when (y-or-n-p (format "Open received file %s%s? "
+                          (signel--sanitize-name (file-name-nondirectory path))
+                          (let ((ext (file-name-extension path)))
+                            (if (and ext (not (string-empty-p ext)))
+                                (format " (.%s)" (signel--sanitize-name ext))
+                              " (no extension)"))))
+    (when (eq system-type 'darwin)
+      (condition-case err
+          (let ((status (call-process
+                         "xattr" nil nil nil "-w" "com.apple.quarantine"
+                         (format "0081;%x;signel;" (truncate (float-time)))
+                         path)))
+            (unless (eq status 0)
+              (signel--log "xattr quarantine of %s failed: %s" path status)))
+        (error (signel--log "xattr quarantine of %s failed: %s" path err))))
+    (browse-url-of-file path)))
+
+(defun signel--insert-file-button (name path type)
+  "Insert a button that opens the on-disk file PATH, sent as NAME of TYPE."
+  (insert-button (signel--file-label name path)
+                 'action (lambda (_) (signel--open-attachment path))
+                 'face 'link
+                 'help-echo (format "Type: %s\nPath: %s"
+                                    (signel--sanitize-name type)
+                                    (signel--sanitize-name path))))
+
 (defun signel--insert-attachment (att &optional known-p)
   "Insert a button or inline image for the attachment ATT at point.
 KNOWN-P is non-nil if the sender is a known contact."
@@ -749,10 +789,7 @@ KNOWN-P is non-nil if the sender is a known contact."
      ((and path (file-exists-p path))
       ;; A: Image (inline or button); B: File Button
       (unless (signel--insert-image-file path known-p)
-        (insert-button (format "[File: %s]" name)
-                       'action (lambda (_) (browse-url-of-file path))
-                       'face 'link
-                       'help-echo (format "Type: %s\nPath: %s" type path))))
+        (signel--insert-file-button name path type)))
      ;; C: Missing/Not Downloaded
      (t
       (let* ((att-id (alist-get 'id att))
@@ -760,10 +797,9 @@ KNOWN-P is non-nil if the sender is a known contact."
              (exists (file-exists-p std-path)))
         (if exists
             (unless (signel--insert-image-file std-path known-p)
-              (insert-button (format "[File: %s]" name)
-                             'action (lambda (_) (browse-url-of-file std-path))
-                             'face 'link))
-          (insert-button (format "[File: %s (Not Downloaded)]" name)
+              (signel--insert-file-button name std-path type))
+          (insert-button (format "[File: %s (Not Downloaded)]"
+                                 (signel--sanitize-name name))
                          'action (lambda (_) (message "File not found at %s" std-path))
                          'face 'font-lock-comment-face)))))))
 
