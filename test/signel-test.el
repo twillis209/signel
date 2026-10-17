@@ -1344,3 +1344,185 @@ Bind `calls' to the recorded (PROGRAM . ARGS), most recent first."
         (goto-char (point-min))
         (should (search-forward "[File: r.pdf]" nil t))
         (should-not (button-at (match-beginning 0)))))))
+
+;;; Sending attachments
+
+(defmacro signel-test--with-att-send (&rest body)
+  "Run BODY in a send-stubbed chat; bind `sent' to decoded requests, newest first.
+Image rendering is stubbed; `calls' records it."
+  (declare (indent 0) (debug t))
+  `(let ((sent nil))
+     (signel-test--with-send
+       (cl-letf (((symbol-function 'process-send-string)
+                  (lambda (_ s) (push (json-read-from-string s) sent))))
+         (signel-test--with-image-stubs calls
+           ,@body)))))
+
+(defun signel-test--att (name &optional clean)
+  "Return a PNG attachment plist called NAME with :clean set to CLEAN."
+  (plist-put (signel--make-attachment name signel-test--png-bytes) :clean clean))
+
+(defun signel-test--input ()
+  "Return the text in the input area."
+  (buffer-substring-no-properties signel--input-marker (point-max)))
+
+(ert-deftest signel-send-attachments-without-caption ()
+  (signel-test--with-att-send
+    (setq signel--pending (list (signel-test--att "p.png" t)))
+    (signel--draw-pending)
+    (goto-char (point-max))
+    (signel--send-input)
+    (should (= 1 (length sent)))
+    (let* ((params (alist-get 'params (car sent)))
+           (atts (alist-get 'attachments params)))
+      (should (vectorp atts))
+      (should (= 1 (length atts)))
+      (should (string-prefix-p "data:image/png;filename=" (aref atts 0)))
+      (should-not (assq 'message params))
+      (should (equal (alist-get 'recipient params) ["+15550008"])))
+    (should-not signel--pending)
+    (should-not (overlay-get signel--pending-overlay 'before-string))
+    ;; Echoed from memory, with the status after it.
+    (should (signel-test--called calls 'insert-image))
+    (should (string-match-p "<Me> \n*<IMG> (sending…)\n" (buffer-string)))))
+
+(ert-deftest signel-send-caption-and-two-attachments ()
+  (signel-test--with-att-send
+    (setq signel--pending (list (signel-test--att "a.png" t)
+                                (signel-test--att "b.png" t)))
+    (signel-test--type-and-send "hi")
+    (should (= 1 (length sent)))
+    (let* ((params (alist-get 'params (car sent)))
+           (atts (alist-get 'attachments params)))
+      (should (equal (alist-get 'message params) "hi"))
+      (should (= 2 (length atts)))
+      (should (string-prefix-p "data:image/png;filename=a.png;" (aref atts 0)))
+      (should (string-prefix-p "data:image/png;filename=b.png;" (aref atts 1))))
+    (should-not signel--pending)
+    (should (equal (signel-test--input) ""))
+    (should (string-match-p "<Me> hi\n+<IMG>\n<IMG> (sending…)\n" (buffer-string)))))
+
+(ert-deftest signel-send-text-only-has-no-attachments-key ()
+  (signel-test--with-att-send
+    (signel-test--type-and-send "plain")
+    (let ((params (alist-get 'params (car sent))))
+      (should (equal (alist-get 'message params) "plain"))
+      (should-not (assq 'attachments params)))))
+
+(ert-deftest signel-send-unclean-declined-keeps-everything ()
+  (signel-test--with-att-send
+    (let ((pending (list (signel-test--att "a.png" t) (signel-test--att "b.png" nil)))
+          (asked nil))
+      (setq signel--pending pending)
+      (signel--draw-pending)
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (prompt) (setq asked prompt) nil)))
+        (signel-test--type-and-send "caption"))
+      (should (equal asked "Some images still contain metadata (e.g. location). Send anyway? "))
+      (should-not sent)
+      (should (eq signel--pending pending))
+      (should (equal (signel-test--input) "caption"))
+      (should-not (string-match-p "<Me>" (buffer-string)))
+      ;; Accepting sends.
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+        (signel--send-input))
+      (should (= 1 (length sent)))
+      (should-not signel--pending))))
+
+(ert-deftest signel-send-message-arriving-during-confirm ()
+  (signel-test--with-att-send
+    (setq signel--pending (list (signel-test--att "a.png" nil)))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_) (signel--insert-msg "+15550008" "Bob" "incoming" nil nil nil) t)))
+      (signel-test--type-and-send "cap"))
+    (should (string-match-p "<Bob> incoming\n" (buffer-string)))
+    (should (string-match-p "<Me> cap" (buffer-string)))
+    (should (equal (signel-test--input) ""))
+    (should (equal (alist-get 'message (alist-get 'params (car sent))) "cap"))))
+
+(ert-deftest signel-send-clean-does-not-ask ()
+  (signel-test--with-att-send
+    (setq signel--pending (list (signel-test--att "a.png" t)
+                                (plist-put (signel--make-attachment "r.pdf" "%PDF") :clean nil)))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) (error "Asked"))))
+      (signel--send-input))
+    (should (= 1 (length sent)))))
+
+(ert-deftest signel-send-error-restores-pending ()
+  (signel-test--with-att-send
+    (let ((a (signel-test--att "a.png" t))
+          (b (signel-test--att "b.png" t))
+          (c (signel-test--att "c.png" t)))
+      (setq signel--pending (list a b))
+      (signel-test--type-and-send "cap")
+      (should-not signel--pending)
+      ;; Owner queues another image meanwhile.
+      (signel--add-pending c)
+      (signel--dispatch '((id . 1) (error . ((code . -1) (message . "boom")))))
+      (should (string-match-p "(failed: boom)" (buffer-string)))
+      (should (equal (mapcar (lambda (x) (plist-get x :name)) signel--pending)
+                     '("c.png" "a.png" "b.png")))
+      (should (string-match-p "\\[a.png\\]"
+                              (overlay-get signel--pending-overlay 'before-string)))
+      (should (equal (signel-test--input) "cap"))
+      ;; The prompt is still read-only.
+      (should (get-text-property (1- signel--input-marker) 'read-only)))))
+
+(ert-deftest signel-send-error-keeps-new-input-and-point ()
+  (signel-test--with-att-send
+    (setq signel--pending (list (signel-test--att "a.png" t)))
+    (signel-test--type-and-send "old")
+    (insert "new")
+    (goto-char (point-min))
+    (signel--dispatch '((id . 1) (error . ((code . -1) (message . "boom")))))
+    (should (equal (signel-test--input) "new"))
+    (should (= (point) (point-min)))
+    (should (= 1 (length signel--pending)))))
+
+(ert-deftest signel-send-error-restores-into-empty-input-without-moving-point ()
+  (signel-test--with-att-send
+    (signel-test--type-and-send "old")
+    (goto-char (point-min))
+    (signel--dispatch '((id . 1) (error . ((code . -1) (message . "boom")))))
+    (should (equal (signel-test--input) "old"))
+    (should (= (point) (point-min)))))
+
+(ert-deftest signel-send-partial-failure-does-not-restore ()
+  (signel-test--with-att-send
+    (setq signel--pending (list (signel-test--att "a.png" t)))
+    (signel-test--type-and-send "cap")
+    (signel--dispatch '((id . 1) (result . ((timestamp . 1)
+                                            (results . [((recipientAddress (number . "+1"))
+                                                         (type . "UNREGISTERED_FAILURE"))])))))
+    (should (string-match-p "not delivered to" (buffer-string)))
+    (should-not signel--pending)
+    (should (equal (signel-test--input) ""))))
+
+(ert-deftest signel-send-error-after-buffer-killed-is-ignored ()
+  (let (cb-ran)
+    (signel-test--with-att-send
+      (setq signel--pending (list (signel-test--att "a.png" t)))
+      (signel-test--type-and-send "cap")
+      (setq cb-ran (gethash 1 signel--rpc-callbacks))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer (current-buffer)))
+      (funcall cb-ran nil '((message . "boom"))))
+    (should cb-ran)))
+
+(ert-deftest signel-send-log-hides-attachment-data ()
+  (let ((b64 (base64-encode-string signel-test--png-bytes t)))
+    (dolist (bodies '(nil t))
+      (let ((signel-log-message-bodies bodies)
+            (logged nil))
+        (signel-test--with-att-send
+          (cl-letf (((symbol-function 'signel--log)
+                     (lambda (fmt &rest args) (push (apply #'format fmt args) logged))))
+            (setq signel--pending (list (signel-test--att "p.png" t)))
+            (signel-test--type-and-send "hi")))
+        (let ((line (seq-find (lambda (l) (string-prefix-p "SEND:" l)) logged)))
+          (should line)
+          (should-not (string-match-p (regexp-quote b64) line))
+          (should-not (string-match-p "base64," line))
+          (if bodies
+              (should (string-match-p "data:<[0-9]+ bytes>" line))
+            (should (string-match-p "attachments=1" line))))))))

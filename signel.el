@@ -1408,10 +1408,13 @@ nothing if BUFFER is dead or the status can't be found."
                 (insert (propertize text 'face face
                                     'signel-send-status status-id))))))))))
 
-(defun signel--send-with-status (params text)
+(defun signel--send-with-status (params text &optional attachments on-error)
   "Send PARAMS as a \"send\" request and echo TEXT as the owner's message.
-The echo line ends with a status that is cleared on success and replaced
-with the failure on partial delivery failure or an RPC error."
+ATTACHMENTS, a list of attachment plists, are shown in the echo from
+memory.  The echo line ends with a status that is cleared on success and
+replaced with the failure on partial delivery failure or an RPC error.
+After an RPC error (not a partial failure), ON-ERROR, if non-nil, is
+called with no arguments in the chat buffer, unless it has been killed."
   (let* ((buffer (current-buffer))
          (status-id (gensym "send"))
          (marker nil)
@@ -1425,13 +1428,18 @@ with the failure on partial delivery failure or an RPC error."
        (let ((failures (and (not err) (signel--send-failures result))))
          (cond
           (err (funcall update (format " (failed: %s)" (alist-get 'message err))
-                        'signel-error-face))
+                        'signel-error-face)
+               (when (and on-error (buffer-live-p buffer))
+                 (with-current-buffer buffer (funcall on-error))))
           (failures
            (funcall update (format " (not delivered to: %s)"
                                    (string-join failures ", "))
                     'signel-error-face))
           (t (funcall update nil nil))))))
-    (setq marker (signel--insert-msg signel--chat-id "Me" text nil nil t))
+    (setq marker (signel--insert-msg
+                  signel--chat-id "Me" text
+                  (mapcar (lambda (att) `((signel-local . ,att))) attachments)
+                  nil t))
     (signel--with-prompt-preserved
       ;; The message's own newline is just before the prompt line.
       (goto-char (point-max))
@@ -1439,25 +1447,50 @@ with the failure on partial delivery failure or an RPC error."
       (insert (propertize " (sending…)" 'face 'signel-timestamp-face
                           'signel-send-status status-id)))))
 
+(defun signel--restore-unsent (attachments caption)
+  "Put back ATTACHMENTS and CAPTION of a message that failed to send.
+ATTACHMENTS are queued after any now pending.  CAPTION goes back in the
+input only if the input is empty; point is not moved."
+  (when attachments
+    (setq signel--pending (append signel--pending attachments))
+    (signel--draw-pending))
+  (when (and caption (= (marker-position signel--input-marker) (point-max)))
+    (save-excursion
+      (goto-char (point-max))
+      (insert caption))))
+
 (defun signel--send-input ()
-  "Send the input from the prompt to the current chat."
+  "Send the input and any pending attachments to the current chat."
   (interactive)
-  (let* ((start (marker-position signel--input-marker))
-         (end (point-max))
-         (text (string-trim (buffer-substring-no-properties start end))))
-    (unless (string-empty-p text)
+  (let* ((text (string-trim (buffer-substring-no-properties
+                              signel--input-marker (point-max))))
+         (caption (and (not (string-empty-p text)) text))
+         (atts signel--pending))
+    (when (or caption atts)
       ;; Check before deleting the draft, so it is not lost.
       (unless (get-process signel--process-name)
         (user-error "Signel service not running. M-x signel-start"))
-      (let ((inhibit-read-only t))
-        (delete-region start end))
-
-      (let ((is-group (signel--is-group-id signel--chat-id))
-            (params `((message . ,text))))
-        (if is-group
-            (push `(groupId . ,signel--chat-id) params)
-          (push `(recipient . [,signel--chat-id]) params))
-        (signel--send-with-status params text)))))
+      (when (or (not (cl-some (lambda (att) (and (plist-get att :image-type)
+                                                 (not (plist-get att :clean))))
+                              atts))
+                (y-or-n-p "Some images still contain metadata (e.g. location). Send anyway? "))
+        (let ((params nil))
+          (when atts
+            (push `(attachments . ,(vconcat (mapcar #'signel--attachment-data-uri atts)))
+                  params))
+          (when caption
+            (push `(message . ,caption) params))
+          (if (signel--is-group-id signel--chat-id)
+              (push `(groupId . ,signel--chat-id) params)
+            (push `(recipient . [,signel--chat-id]) params))
+          ;; Not START and END: a message may have arrived during `y-or-n-p'.
+          (let ((inhibit-read-only t))
+            (delete-region signel--input-marker (point-max)))
+          (signel--send-with-status
+           params caption atts
+           (lambda () (signel--restore-unsent atts caption)))
+          (setq signel--pending nil)
+          (signel--draw-pending))))))
 
 ;;;###autoload
 (defun signel-attach-file (file-path)
