@@ -65,5 +65,63 @@ Any pre-existing buffer for ID is killed first so each test starts clean."
       (signel--process-filter nil "{\"b\":2}\n"))
     (should (equal calls '(((b . 2)))))))
 
+(ert-deftest signel-log-summary-hides-body ()
+  (let ((signel-log-message-bodies nil))
+    (should-not (string-match-p "secret"
+      (signel--log-summary "SEND" '((method . "send") (id . 1)
+                                    (params (message . "secret") (recipient . ["+44"]))))))
+    (let ((s (signel--log-summary
+              "SEND" '((method . "send") (id . 1)
+                       (params (message . "secret") (recipient . ["+44"])
+                               (attachments . ["/tmp/pic.png" "/tmp/b.png"]))))))
+      (should (string-match-p "method=send" s))
+      (should (string-match-p "+44" s))
+      (should (string-match-p "attachments=2" s))
+      (should-not (string-match-p "pic.png" s)))))
+
+(ert-deftest signel-log-summary-hides-received-content ()
+  (let ((signel-log-message-bodies nil))
+    (let ((s (signel--log-summary
+              "RECV" '((method . "receive")
+                       (params (envelope (sourceName . "Alice Secret")
+                                         (dataMessage (message . "hello secret")
+                                                      (attachments ((filename . "diary.png"))))))))))
+      (should (string-match-p "method=receive" s))
+      (dolist (w '("Alice" "secret" "diary"))
+        (should-not (string-match-p w s))))))
+
+(ert-deftest signel-log-summary-truncates-data-uri ()
+  (let ((signel-log-message-bodies t))
+    (should (string-match-p "data:<[0-9]+ bytes>"
+      (signel--log-summary "SEND" `((params (attachments . [,(concat "data:image/png;base64," (make-string 5000 ?A))]))))))
+    (should-not (string-match-p "AAAA"
+      (signel--log-summary "SEND" `((params (attachments . [,(concat "data:image/png;base64," (make-string 5000 ?A))]))))))))
+
+(defun signel-test--rpc-roundtrip (reply)
+  "Send an RPC with a callback, dispatch REPLY (given the id) twice.
+Return the list of (RESULT ERROR) callback invocations."
+  (let ((signel--rpc-callbacks (make-hash-table :test 'equal))
+        (signel--request-buffer-map (make-hash-table :test 'equal))
+        (signel--rpc-id-counter 0)
+        (calls nil))
+    (cl-letf (((symbol-function 'get-process) (lambda (_) t))
+              ((symbol-function 'process-send-string) #'ignore))
+      (let* ((id (signel--send-rpc "listContacts" nil nil
+                                   (lambda (r e) (push (list r e) calls))))
+             (json (cons (cons 'id id) reply)))
+        (signel--dispatch json)
+        (signel--dispatch json)))
+    (nreverse calls)))
+
+(ert-deftest signel-dispatch-calls-result-callback ()
+  (should (equal (signel-test--rpc-roundtrip '((result . ((ok . t)))))
+                 '((((ok . t)) nil)))))
+
+(ert-deftest signel-dispatch-calls-error-callback ()
+  (let ((calls (signel-test--rpc-roundtrip '((error . ((message . "boom")))))))
+    (should (= (length calls) 1))
+    (should-not (car (car calls)))
+    (should (cadr (car calls)))))
+
 (provide 'signel-test)
 ;;; signel-test.el ends here

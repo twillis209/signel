@@ -86,6 +86,13 @@ When nil, only the first frame of animated media will be displayed."
 A longer line is dropped and logged; other lines are unaffected."
   :type 'integer)
 
+(defcustom signel-log-message-bodies nil
+  "If non-nil, log full JSON of requests and replies to *signel-log*.
+By default only the method, id and (for sends) the recipient and
+attachment count are logged, so message text, names and attachment
+paths never reach the log.  `data:' URIs are always shortened."
+  :type 'boolean)
+
 (defcustom signel-auto-open-buffer t
   "If non-nil, automatically display the chat buffer when a message arrives."
   :type 'boolean)
@@ -122,6 +129,9 @@ A longer line is dropped and logged; other lines are unaffected."
 (defvar signel--request-buffer-map (make-hash-table :test 'equal)
   "Mapping of RPC ID to buffer name for error reporting.")
 
+(defvar signel--rpc-callbacks (make-hash-table :test 'equal)
+  "Mapping of RPC ID to a function called with (RESULT ERROR) on reply.")
+
 (defvar signel--contact-map (make-hash-table :test 'equal)
   "Cache of phone numbers to display names.")
 
@@ -140,6 +150,45 @@ A longer line is dropped and logged; other lines are unaffected."
     (insert (format-time-string "[%H:%M:%S] "))
     (insert (apply #'format fmt args))
     (insert "\n")))
+
+(defun signel--shorten-data-uris (obj)
+  "Return a copy of OBJ with each `data:' string replaced by its length."
+  (cond
+   ((and (stringp obj) (string-prefix-p "data:" obj))
+    (format "data:<%d bytes>" (length obj)))
+   ((consp obj) (cons (signel--shorten-data-uris (car obj))
+                      (signel--shorten-data-uris (cdr obj))))
+   ((vectorp obj) (vconcat (mapcar #'signel--shorten-data-uris obj)))
+   (t obj)))
+
+(defun signel--log-summary (direction obj)
+  "Return a log line for DIRECTION (a string) and the JSON object OBJ.
+Unless `signel-log-message-bodies' is non-nil, only the method, id and,
+for `send', the recipient or group and attachment count are included."
+  (if signel-log-message-bodies
+      (format "%s: %s" direction
+              (json-encode (signel--shorten-data-uris obj)))
+    (let* ((method (alist-get 'method obj))
+           (id (alist-get 'id obj))
+           (params (alist-get 'params obj))
+           (parts (list (format "%s:" direction))))
+      (when method (push (format "method=%s" method) parts))
+      (when id (push (format "id=%s" id) parts))
+      (when (equal method "send")
+        (let ((target (or (alist-get 'recipient params)
+                          (alist-get 'groupId params)
+                          (alist-get 'username params)))
+              (atts (alist-get 'attachments params)))
+          (when target
+            (push (format "to=%s"
+                          (if (sequencep target)
+                              (if (stringp target)
+                                  target
+                                (mapconcat #'identity target ","))
+                            target))
+                  parts))
+          (push (format "attachments=%d" (length atts)) parts)))
+      (mapconcat #'identity (nreverse parts) " "))))
 
 (defun signel-toggle-log ()
   "Display the debug log buffer."
@@ -164,6 +213,7 @@ A longer line is dropped and logged; other lines are unaffected."
   ;; State cleanup
   (setq signel--partial-line "")
   (clrhash signel--request-buffer-map)
+  (clrhash signel--rpc-callbacks)
 
   (let ((proc (make-process
                :name signel--process-name
@@ -185,10 +235,12 @@ A longer line is dropped and logged; other lines are unaffected."
     (delete-process signel--process-name)
     (message "Signel service stopped.")))
 
-(defun signel--send-rpc (method params &optional target-buffer)
-  "Send a JSON-RPC payload with METHOD and PARAMS.
+(defun signel--send-rpc (method params &optional target-buffer callback)
+  "Send a JSON-RPC payload with METHOD and PARAMS; return the request ID.
 If TARGET-BUFFER is non-nil, map the request ID to that buffer for
-error handling."
+error handling.  If CALLBACK is non-nil, call it once as
+\(funcall CALLBACK RESULT ERROR) when the reply arrives; one of
+RESULT and ERROR is nil."
   (unless (get-process signel--process-name)
     (error "Signel service not running. M-x signel-start"))
   (let* ((id (cl-incf signel--rpc-id-counter))
@@ -199,7 +251,9 @@ error handling."
          (json-str (json-encode req)))
     (when target-buffer
       (puthash id (buffer-name target-buffer) signel--request-buffer-map))
-    (signel--log "SEND: %s" json-str)
+    (when callback
+      (puthash id callback signel--rpc-callbacks))
+    (signel--log "%s" (signel--log-summary "SEND" req))
     (process-send-string signel--process-name (concat json-str "\n"))
     id))
 
@@ -234,9 +288,9 @@ Output is split into lines first; a line longer than
                        (length line))
         (setq line (string-trim line))
         (when (and (not (string-empty-p line)) (string-prefix-p "{" line))
-          (signel--log "RECV: %s" line)
           (condition-case err
               (let ((json (json-read-from-string line)))
+                (signel--log "%s" (signel--log-summary "RECV" json))
                 (signel--dispatch json))
             (error (signel--log "JSON Error: %s" err))))))))
 
@@ -253,8 +307,19 @@ Output is split into lines first; a line longer than
         (id (alist-get 'id json))
         (params (alist-get 'params json)))
     (cond
-     ((string= method "receive") (signel--handle-receive params))
-     (error-obj (signel--handle-error id error-obj)))))
+     ((equal method "receive") (signel--handle-receive params))
+     (error-obj
+      (signel--handle-error id error-obj)
+      (signel--run-callback id nil error-obj))
+     ((and id (assq 'result json))
+      (signel--run-callback id (alist-get 'result json) nil)))))
+
+(defun signel--run-callback (id result error-obj)
+  "Call and forget the callback registered for ID with RESULT and ERROR-OBJ."
+  (let ((cb (gethash id signel--rpc-callbacks)))
+    (when cb
+      (remhash id signel--rpc-callbacks)
+      (funcall cb result error-obj))))
 
 (defun signel--handle-error (id error-obj)
   "Handle RPC errors for request ID using ERROR-OBJ."
