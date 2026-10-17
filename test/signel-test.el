@@ -849,3 +849,18 @@ fixture file name."
     (should (equal bidi-paragraph-separate-re "^"))
     (should (local-variable-p 'bidi-paragraph-direction))
     (should (eq bidi-paragraph-direction 'left-to-right))))
+
+(ert-deftest signel-send-input-keeps-draft-without-process ()
+  (let (sent)
+    (cl-letf (((symbol-function 'get-process) (lambda (_) nil))
+              ((symbol-function 'process-send-string)
+               (lambda (&rest _) (setq sent t))))
+      (signel-test-with-chat "+15550011"
+        (goto-char (point-max))
+        (insert "my draft")
+        (should-error (signel--send-input) :type 'user-error)
+        (should (equal (buffer-substring-no-properties
+                        signel--input-marker (point-max))
+                       "my draft"))
+        (should-not (string-match-p "<Me>" (buffer-string)))))
+    (should-not sent)))

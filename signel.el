@@ -1089,6 +1089,9 @@ with the failure on partial delivery failure or an RPC error."
          (end (point-max))
          (text (string-trim (buffer-substring-no-properties start end))))
     (unless (string-empty-p text)
+      ;; Check before deleting the draft, so it is not lost.
+      (unless (get-process signel--process-name)
+        (user-error "Signel service not running. M-x signel-start"))
       (let ((inhibit-read-only t))
         (delete-region start end))
 
