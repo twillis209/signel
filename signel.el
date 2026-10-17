@@ -212,9 +212,27 @@ Each value is a plist (:name STRING :blocked BOOL).")
   "Return STRING made safe as an osascript argv item.
 Sanitise, truncate to 200 characters, and prefix a space if it starts
 with \"-\" so it cannot be parsed as an option."
-  (let ((clean (signel--sanitize-name string)))
-    (when (> (length clean) 200) (setq clean (substring clean 0 200)))
+  (let ((clean (signel--notify-truncate string)))
     (if (string-prefix-p "-" clean) (concat " " clean) clean)))
+
+(defun signel--dbus-available-p ()
+  "Return non-nil if D-Bus desktop notifications can be sent."
+  (and (featurep 'dbusbind) (fboundp 'notifications-notify)))
+
+(defun signel--notify-truncate (string)
+  "Return STRING sanitised and truncated to 200 characters."
+  (let ((clean (signel--sanitize-name string)))
+    (if (> (length clean) 200) (substring clean 0 200) clean)))
+
+(defun signel--notify-markup-escape (string)
+  "Escape `&', `<' and `>' in STRING for a notification body."
+  (replace-regexp-in-string
+   ">" "&gt;"
+   (replace-regexp-in-string
+    "<" "&lt;"
+    (replace-regexp-in-string "&" "&amp;" string t t)
+    t t)
+   t t))
 
 (defun signel--notify (title body)
   "Show a desktop notification with TITLE and BODY.  Never signals.
@@ -237,9 +255,11 @@ items (never as script text).  Elsewhere use D-Bus when available."
            :noquery t
            :buffer nil
            :sentinel #'ignore)))
-       ((and (featurep 'dbusbind) (fboundp 'notifications-notify))
-        (notifications-notify :title (signel--sanitize-name title)
-                              :body (signel--sanitize-name body))))
+       ((signel--dbus-available-p)
+        ;; Notification daemons interpret markup in the body.
+        (notifications-notify
+         :title (signel--notify-truncate title)
+         :body (signel--notify-markup-escape (signel--notify-truncate body)))))
     (error (signel--log "Notification failed: %s" (error-message-string err))
            nil)))
 
