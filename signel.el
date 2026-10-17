@@ -4,7 +4,7 @@
 
 ;; Author: Keenan Salandy <keenan@salandy.dev>
 ;; Maintainer: Keenan Salandy <keenan@salandy.dev>
-;; URL: https://github.com/keenban/signel
+;; URL: https://github.com/twillis209/signel
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "27.1"))
 
@@ -28,12 +28,42 @@
 ;; Signel.el provides a lightweight, text-based interface for Signal. It
 ;; communicates with a running `signal-cli' daemon via JSON-RPC.
 ;;
+;; This is a fork of keenban/signel with security hardening:
+;; https://github.com/twillis209/signel
+;;
 ;; Features:
 ;; - Strict chat buffers (read-only history, guarded prompt).
-;; - Inline image rendering.
+;; - Inline images from known contacts; other images behind a button.
 ;; - Sticker support (APNG->GIF conversion for animation).
 ;; - Auto-refreshing dashboard of active chats.
-;; - Native Emacs desktop notifications.
+;; - Native desktop notifications (osascript on macOS, D-Bus on Linux).
+;;
+;; Images: PNG, JPEG and GIF attachments and WebP stickers from known
+;; contacts (a saved name, not blocked) show inline straight away.
+;; Other images show a [Show image] or [Show sticker] button that
+;; renders on click.  Formats are detected from the file contents, not
+;; the sender's MIME type.  Animations stop after
+;; `signel-animation-max-time' seconds.  See `signel-auto-display-images'.
+;;
+;; Received files: the button shows the file's real extension.  Opening
+;; asks for confirmation; on macOS the file is marked with the
+;; com.apple.quarantine attribute first.
+;;
+;; Names: contacts show under the owner's saved name; others show the
+;; profile name and number.  Group chats always show numbers.  The
+;; contact list is synced from the phone; use `signel-refresh-contacts'
+;; to re-request it.  Messages wait up to `signel-contacts-timeout'
+;; seconds for it.
+;;
+;; Sending shows "(sending…)" until signal-cli confirms; partial
+;; group failures are listed.
+;;
+;; Logging: message bodies are not logged unless
+;; `signel-log-message-bodies' is non-nil.
+;;
+;; Other options: `signel-animation-max-time', `signel-auto-display-images',
+;; `signel-contacts-timeout' and `signel-max-line-length' (which caps a
+;; single line of signal-cli output).
 ;;
 ;; Prerequisites:
 ;; 1. signal-cli installed and in $PATH.

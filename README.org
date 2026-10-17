@@ -4,13 +4,16 @@
 Signel is an Emacs interface for [[https://signal.org][Signal]]. It communicates with a running
 ~signal-cli~ daemon via JSON-RPC to send and receive messages.
 
+This is a fork of [[https://github.com/keenban/signel][keenban/signel]] with security hardening: [[https://github.com/twillis209/signel][https://github.com/twillis209/signel]].
+
 ** Features
 
 - *Chat Buffers*: Read-only history with a guarded input prompt.
-- *Media Support*: Renders inline images and attachments.
-- *Animated Stickers*: Automatically converts APNG and WebP stickers to GIF for playback in Emacs.
+- *Images*: Images from known contacts show inline; others show a ~[Show image]~ button. PNG, JPEG, GIF and WebP are detected from file contents.
+- *Animated Stickers*: Automatically converts APNG and WebP stickers to GIF for playback in Emacs. Animation stops after ~signel-animation-max-time~ seconds.
+- *Attachments*: Received files show their real extension; opening one asks for confirmation (and is quarantined on macOS).
 - *Dashboard*: Overview of active conversations.
-- *Notifications*: Native desktop notifications on new messages.
+- *Notifications*: Native macOS notifications (via ~osascript~) or D-Bus notifications on Linux.
 
 ** Dependencies
 
@@ -65,6 +68,30 @@ For a basic configuration, place this in your ~user-init-file~
 
 - Open a specific chat directly:
   ~M-x signel-chat~
+
+- Re-read the contact list from your phone (contacts show their saved names):
+  ~M-x signel-refresh-contacts~
+
+*** Names and images
+
+Contacts with a saved name (and not blocked) are shown under that name. Other senders show their profile name and number. Group chats always show numbers. Sent messages show "(sending…)" until signal-cli confirms, and partial group failures are listed.
+
+*** Customisation
+
+| Option                       | Default   | Purpose                                                              |
+|------------------------------|-----------|----------------------------------------------------------------------|
+| ~signel-auto-display-images~ | ~t~       | Show known contacts' images inline; if nil, always use buttons       |
+| ~signel-animation-max-time~  | ~15~      | Seconds an animated image or sticker keeps animating                 |
+| ~signel-log-message-bodies~  | ~nil~     | Log full message JSON to ~*signel-log*~                              |
+| ~signel-max-line-length~     | ~5000000~ | Longest line of signal-cli output accepted; longer lines are dropped |
+| ~signel-contacts-timeout~    | ~5~       | Seconds to hold incoming messages while waiting for contacts         |
+
+For example:
+
+#+begin_src emacs-lisp
+(setq signel-animation-max-time 5
+      signel-auto-display-images nil)
+#+end_src
 
 *** Keybindings
 
