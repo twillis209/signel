@@ -988,3 +988,95 @@ fixture file name."
           (let ((signel-max-attachment-size 3))
             (should-error (signel--read-file-bytes f) :type 'user-error)))
       (delete-file f))))
+
+;;; Metadata cleaning
+
+(defconst signel-test--jpeg-bytes (unibyte-string #xff #xd8 #xff #xe0 0 #x10 ?J ?F ?I ?F 0))
+(defconst signel-test--tiff-bytes (unibyte-string ?I ?I 42 0 8 0 0 0))
+
+(defmacro signel-test-with-magick (result-bytes status &rest body)
+  "Run BODY with ImageMagick stubbed; bind `calls' to recorded (PROGRAM . ARGS).
+The stub replaces the buffer with RESULT-BYTES and returns STATUS."
+  (declare (indent 2))
+  `(let ((calls nil))
+     (cl-letf (((symbol-function 'executable-find)
+                (lambda (p &rest _) (and (equal p "magick") "/x/magick")))
+               ((symbol-function 'call-process-region)
+                (lambda (start end program &optional delete buffer display &rest args)
+                  (push (cons program args) calls)
+                  (should (not enable-multibyte-characters))
+                  (delete-region start end)
+                  (insert ,result-bytes)
+                  ,status)))
+       ,@body)))
+
+(ert-deftest signel-clean-attachment-jpeg-argv-and-result ()
+  (let* ((orig (signel--make-attachment "a.jpg" (concat signel-test--jpeg-bytes "EXIF")))
+         (new-bytes (concat signel-test--jpeg-bytes "clean")))
+    (signel-test-with-magick new-bytes 0
+      (let ((out (signel--clean-attachment orig)))
+        (should (equal (car calls) '("magick" "jpeg:-" "-auto-orient" "-strip" "jpeg:-")))
+        (should (plist-get out :clean))
+        (should (equal (plist-get out :bytes) new-bytes))
+        (should-not (plist-get orig :clean))
+        (should-not (eq out orig))))))
+
+(ert-deftest signel-clean-attachment-tiff-is-cleaned ()
+  (let ((orig (signel--make-attachment "a.tif" signel-test--tiff-bytes)))
+    (should (eq (plist-get orig :image-type) 'tiff))
+    (signel-test-with-magick signel-test--tiff-bytes 0
+      (let ((out (signel--clean-attachment orig)))
+        (should (equal (cdr (car calls)) '("tiff:-" "-auto-orient" "-strip" "tiff:-")))
+        (should (plist-get out :clean))))))
+
+(ert-deftest signel-clean-attachment-heic-becomes-jpeg ()
+  (let ((orig (list :name "IMG_1.HEIC" :bytes "heicdata" :image-type 'heic
+                    :mime "image/heic" :clean nil)))
+    (signel-test-with-magick signel-test--jpeg-bytes 0
+      (let ((out (signel--clean-attachment orig)))
+        (should (equal (cdr (car calls)) '("heic:-" "-auto-orient" "-strip" "jpeg:-")))
+        (should (equal (plist-get out :name) "IMG_1.jpg"))
+        (should (equal (plist-get out :mime) "image/jpeg"))
+        (should (eq (plist-get out :image-type) 'jpeg))
+        (should (plist-get out :clean))
+        (should (equal (plist-get orig :name) "IMG_1.HEIC"))))))
+
+(ert-deftest signel-clean-attachment-no-imagemagick ()
+  (let ((orig (signel--make-attachment "a.jpg" signel-test--jpeg-bytes)))
+    (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) nil))
+              ((symbol-function 'call-process-region)
+               (lambda (&rest _) (error "must not run"))))
+      (let ((out (signel--clean-attachment orig)))
+        (should (equal (plist-get out :bytes) signel-test--jpeg-bytes))
+        (should-not (plist-get out :clean))))))
+
+(ert-deftest signel-clean-attachment-failure-keeps-original ()
+  (let ((orig (signel--make-attachment "a.jpg" signel-test--jpeg-bytes)))
+    (signel-test-with-magick "garbage" 1
+      (let ((out (signel--clean-attachment orig)))
+        (should (equal (plist-get out :bytes) signel-test--jpeg-bytes))
+        (should-not (plist-get out :clean))))
+    ;; Exit 0 but wrong output type is also a failure.
+    (signel-test-with-magick "not an image" 0
+      (let ((out (signel--clean-attachment orig)))
+        (should (equal (plist-get out :bytes) signel-test--jpeg-bytes))
+        (should-not (plist-get out :clean))))))
+
+(ert-deftest signel-clean-attachment-gif-and-files-untouched ()
+  (dolist (att (list (signel--make-attachment "a.gif" "GIF89a....")
+                     (signel--make-attachment "r.pdf" "%PDF-1.7")))
+    (signel-test-with-magick "x" 0
+      (let ((out (signel--clean-attachment att)))
+        (should-not calls)
+        (should (plist-get out :clean))
+        (should (equal (plist-get out :bytes) (plist-get att :bytes)))))))
+
+(ert-deftest signel-clean-attachment-non-exif-image-types-untouched ()
+  (dolist (data '("<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"
+                  "%!PS-Adobe-3.0\n"))
+    (let ((att (signel--make-attachment "x.bin" data)))
+      (signel-test-with-magick "x" 0
+        (let ((out (signel--clean-attachment att)))
+          (should-not calls)
+          (should (plist-get out :clean))
+          (should (equal (plist-get out :bytes) data)))))))

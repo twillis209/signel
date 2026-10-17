@@ -945,6 +945,66 @@ Signal a `user-error' before reading if it exceeds the size limit."
     (insert-file-contents-literally file)
     (buffer-string)))
 
+;;; Metadata cleaning
+
+(defun signel--imagemagick-program ()
+  "Return the ImageMagick executable name (`magick' or `convert'), or nil."
+  (cond ((executable-find "magick") "magick")
+        ((executable-find "convert") "convert")))
+
+(defun signel--run-imagemagick (bytes args)
+  "Pipe the unibyte string BYTES through ImageMagick with argument list ARGS.
+Return the output bytes on exit status 0, else nil."
+  (let ((program (signel--imagemagick-program)))
+    (when program
+      (let ((coding-system-for-read 'binary)
+            (coding-system-for-write 'binary))
+        (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (insert bytes)
+          (when (eq 0 (apply #'call-process-region
+                             (point-min) (point-max) program t t nil args))
+            (buffer-string)))))))
+
+(defun signel--sniff-bytes (bytes)
+  "Return the image type of the unibyte string BYTES, or nil."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert bytes)
+    (signel--sniff-image-buffer)))
+
+(defun signel--clean-attachment (att)
+  "Return a new attachment plist: ATT with photo metadata stripped.
+JPEG, PNG, WebP and TIFF are re-encoded through ImageMagick with
+`-auto-orient -strip'; HEIC is converted to JPEG.  Other types carry no
+EXIF container and are returned unchanged and clean.  On any failure
+return ATT with :clean nil."
+  (let* ((type (plist-get att :image-type))
+         (att (copy-sequence att)))
+    (if (not (memq type '(jpeg png webp tiff heic)))
+        (plist-put att :clean t)
+      (let* ((out-type (if (eq type 'heic) 'jpeg type))
+             (args (list (format "%s:-" type) "-auto-orient" "-strip"
+                         (format "%s:-" out-type)))
+             (out (condition-case err
+                      (signel--run-imagemagick (plist-get att :bytes) args)
+                    (error (signel--log "Metadata cleaning failed: %s"
+                                        (error-message-string err))
+                           nil))))
+        (cond
+         ((and out (eq (signel--sniff-bytes out) out-type))
+          (setq att (plist-put att :bytes out))
+          (when (eq type 'heic)
+            (setq att (plist-put att :image-type 'jpeg))
+            (setq att (plist-put att :mime "image/jpeg"))
+            (setq att (plist-put
+                       att :name
+                       (concat (file-name-sans-extension (plist-get att :name))
+                               ".jpg"))))
+          (plist-put att :clean t))
+         (t (signel--log "Metadata cleaning failed for a %s attachment" type)
+            (plist-put att :clean nil)))))))
+
 ;;; Received files
 
 (defun signel--file-label (name path)
