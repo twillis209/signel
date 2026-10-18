@@ -1008,16 +1008,18 @@ returned whatever target is asked for."
         (or (and (fboundp 'gui-get-selection) window-system
                  (funcall check (ignore-errors
                                   (gui-get-selection 'CLIPBOARD 'image/png))))
-            (funcall check
-                     (cond
-                      ((eq system-type 'darwin)
-                       (signel--clipboard-command-bytes "pngpaste" "-"))
-                      ((and (getenv "WAYLAND_DISPLAY")
-                            (executable-find "wl-paste"))
-                       (signel--clipboard-command-bytes
-                        "wl-paste" "--no-newline" "--type" "image/png"))
-                      (t (signel--clipboard-command-bytes
-                          "xclip" "-selection" "clipboard" "-t" "image/png" "-o"))))))
+            (let ((argv (cond
+                         ((eq system-type 'darwin) '("pngpaste" "-"))
+                         ((and (getenv "WAYLAND_DISPLAY")
+                               (executable-find "wl-paste"))
+                          '("wl-paste" "--no-newline" "--type" "image/png"))
+                         (t '("xclip" "-selection" "clipboard"
+                              "-t" "image/png" "-o")))))
+              (if (executable-find (car argv))
+                  (funcall check
+                           (apply #'signel--clipboard-command-bytes argv))
+                (signel--log "No clipboard image tool found")
+                nil))))
     (error (signel--log "Clipboard image read failed: %s" (error-message-string err))
            nil)))
 

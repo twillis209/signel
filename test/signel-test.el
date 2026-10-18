@@ -1633,3 +1633,25 @@ Image rendering is stubbed; `calls' records it."
       (signel-test--type-and-send "cap"))
     (should (equal (alist-get 'message (alist-get 'params (car sent))) "cap more"))
     (should (equal (signel-test--input) ""))))
+
+(ert-deftest signel-clipboard-image-logs-missing-tool ()
+  (dolist (env '((darwin) (gnu/linux "WAYLAND_DISPLAY=wayland-0") (gnu/linux)))
+    (let ((system-type (car env))
+          (process-environment (append (cdr env) (list "WAYLAND_DISPLAY")
+                                       process-environment))
+          (logged nil))
+      (signel-test-with-clipboard-tools '() "" 0
+        (cl-letf (((symbol-function 'signel--log)
+                   (lambda (fmt &rest args) (push (apply #'format fmt args) logged))))
+          (should-not (signel--clipboard-image))
+          (should-not calls)
+          (should (equal logged '("No clipboard image tool found"))))))))
+
+(ert-deftest signel-clipboard-image-tool-present-does-not-log ()
+  (let ((system-type 'darwin)
+        (logged nil))
+    (signel-test-with-clipboard-tools '("pngpaste") signel-test--png-bytes 0
+      (cl-letf (((symbol-function 'signel--log)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) logged))))
+        (should (signel--clipboard-image))
+        (should-not logged)))))
