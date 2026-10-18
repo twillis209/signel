@@ -88,14 +88,14 @@ Metadata (location, camera data) is stripped from images with ImageMagick (~magi
 
 *** Customisation
 
-| Option                       | Default   | Purpose                                                              |
-|------------------------------|-----------|----------------------------------------------------------------------|
-| ~signel-auto-display-images~ | ~t~       | Show known contacts' images inline; if nil, always use buttons       |
-| ~signel-animation-max-time~  | ~15~      | Seconds an animated image or sticker keeps animating                 |
-| ~signel-log-message-bodies~  | ~nil~     | Log full message JSON to ~*signel-log*~                              |
-| ~signel-max-line-length~     | ~5000000~ | Longest line of signal-cli output accepted; longer lines are dropped |
-| ~signel-contacts-timeout~    | ~5~       | Seconds to hold incoming messages while waiting for contacts         |
-| ~signel-max-attachment-size~ | ~104857600~ | Largest outgoing attachment, in bytes                              |
+| Option                       | Default     | Purpose                                                              |
+|------------------------------|-------------|----------------------------------------------------------------------|
+| ~signel-auto-display-images~ | ~t~         | Show known contacts' images inline; if nil, always use buttons       |
+| ~signel-animation-max-time~  | ~15~        | Seconds an animated image or sticker keeps animating                 |
+| ~signel-log-message-bodies~  | ~nil~       | Log full message JSON to ~*signel-log*~                              |
+| ~signel-max-line-length~     | ~5000000~   | Longest line of signal-cli output accepted; longer lines are dropped |
+| ~signel-contacts-timeout~    | ~5~         | Seconds to hold incoming messages while waiting for contacts         |
+| ~signel-max-attachment-size~ | ~104857600~ | Largest outgoing attachment, in bytes                                |
 
 For example:
 
@@ -108,13 +108,13 @@ For example:
 
 **** In Chat Buffers
 
-| Key                | Command                 | Action                                  |
-|--------------------+-------------------------+-----------------------------------------|
-| ~RET~              | ~signel-send-input~     | Send message and queued items           |
-| ~C-c C-c~          | ~signel-send-input~     | Send message and queued items           |
-| ~C-c C-a~          | ~signel-attach-file~    | Queue a file                            |
-| ~C-c C-k~          | ~signel-remove-pending~ | Remove last queued item (~C-u~: all)    |
-| ~C-y~, ~p~, ~P~    | ~signel-paste~           | Queue clipboard image, else paste text  |
+| Key             | Command                 | Action                                 |
+|-----------------|-------------------------|----------------------------------------|
+| ~RET~           | ~signel--send-input~    | Send message and queued items          |
+| ~C-c C-c~       | ~signel--send-input~    | Send message and queued items          |
+| ~C-c C-a~       | ~signel-attach-file~    | Queue a file                           |
+| ~C-c C-k~       | ~signel-remove-pending~ | Remove last queued item (~C-u~: all)   |
+| ~C-y~, ~p~, ~P~ | ~signel-paste~          | Queue clipboard image, else paste text |
 
 **** In Dashboard
 
