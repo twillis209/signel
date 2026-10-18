@@ -12,6 +12,7 @@ This is a fork of [[https://github.com/keenban/signel][keenban/signel]] with sec
 - *Images*: Images from known contacts show inline; others show a ~[Show image]~ button. PNG, JPEG, GIF and WebP are detected from file contents.
 - *Animated Stickers*: Automatically converts APNG and WebP stickers to GIF for playback in Emacs. Animation stops after ~signel-animation-max-time~ seconds.
 - *Attachments*: Received files show their real extension; opening one asks for confirmation (and is quarantined on macOS).
+- *Sending images*: Paste an image or attach any file; images are stripped of metadata before sending.
 - *Dashboard*: Overview of active conversations.
 - *Notifications*: Native macOS notifications (via ~osascript~) or D-Bus notifications on Linux.
 
@@ -19,7 +20,8 @@ This is a fork of [[https://github.com/keenban/signel][keenban/signel]] with sec
 
 1. *Emacs 27.1+*
 2. *[[https://github.com/AsamK/signal-cli][signal-cli]]*: Must be installed and available in your ~$PATH~.
-3. *ImageMagick* (Optional): The ~convert~ command is required to render animated stickers.
+3. *ImageMagick* (Optional): ~convert~ renders animated stickers; ~magick~ or ~convert~ strips metadata from sent images and converts HEIC to JPEG.
+4. *Clipboard tool* (Optional): ~pngpaste~ (macOS), ~wl-paste~ (Wayland) or ~xclip~ (X11), for pasting images. Emacs's own clipboard is tried first.
 
 ** Setup
 
@@ -76,6 +78,14 @@ For a basic configuration, place this in your ~user-init-file~
 
 Contacts with a saved name (and not blocked) are shown under that name. Other senders show their profile name and number. Group chats always show numbers. Sent messages show "(sending…)" until signal-cli confirms, and partial group failures are listed.
 
+*** Sending images and files
+
+In a chat, ~C-y~ (evil ~p~/~P~, or Cmd-V) queues an image from the clipboard instead of pasting text. Text pastes as before, and evil named registers are untouched. ~C-c C-a~ queues any file.
+
+Queued items appear above the prompt with the recipient's name. ~C-c C-k~ removes the last one; ~C-u C-c C-k~ removes all. Type an optional caption and press ~RET~ to send everything as one message. If a send fails, the items and caption come back.
+
+Metadata (location, camera data) is stripped from images with ImageMagick (~magick~ or ~convert~). HEIC is converted to JPEG; GIFs and non-image files are sent unchanged. If an image could not be cleaned it is marked, and ~RET~ asks before sending. Files over ~signel-max-attachment-size~ (default 100 MB) are refused.
+
 *** Customisation
 
 | Option                       | Default   | Purpose                                                              |
@@ -85,6 +95,7 @@ Contacts with a saved name (and not blocked) are shown under that name. Other se
 | ~signel-log-message-bodies~  | ~nil~     | Log full message JSON to ~*signel-log*~                              |
 | ~signel-max-line-length~     | ~5000000~ | Longest line of signal-cli output accepted; longer lines are dropped |
 | ~signel-contacts-timeout~    | ~5~       | Seconds to hold incoming messages while waiting for contacts         |
+| ~signel-max-attachment-size~ | ~104857600~ | Largest outgoing attachment, in bytes                              |
 
 For example:
 
@@ -97,11 +108,13 @@ For example:
 
 **** In Chat Buffers
 
-| Key       | Command              | Action       |
-|-----------+----------------------+--------------|
-| ~RET~     | ~signel-send-input~  | Send message |
-| ~C-c C-c~ | ~signel-send-input~  | Send message |
-| ~C-c C-a~ | ~signel-attach-file~ | Attach file  |
+| Key                | Command                 | Action                                  |
+|--------------------+-------------------------+-----------------------------------------|
+| ~RET~              | ~signel-send-input~     | Send message and queued items           |
+| ~C-c C-c~          | ~signel-send-input~     | Send message and queued items           |
+| ~C-c C-a~          | ~signel-attach-file~    | Queue a file                            |
+| ~C-c C-k~          | ~signel-remove-pending~ | Remove last queued item (~C-u~: all)    |
+| ~C-y~, ~p~, ~P~    | ~signel-paste~           | Queue clipboard image, else paste text  |
 
 **** In Dashboard
 

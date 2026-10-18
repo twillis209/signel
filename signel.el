@@ -37,6 +37,7 @@
 ;; - Sticker support (APNG->GIF conversion for animation).
 ;; - Auto-refreshing dashboard of active chats.
 ;; - Native desktop notifications (osascript on macOS, D-Bus on Linux).
+;; - Send images and files, with metadata stripped from images.
 ;;
 ;; Images: PNG, JPEG and GIF attachments and WebP stickers from known
 ;; contacts (a saved name, not blocked) show inline straight away.
@@ -58,6 +59,19 @@
 ;; Sending shows "(sending…)" until signal-cli confirms; partial
 ;; group failures are listed.
 ;;
+;; Sending images: in a chat, C-y (evil p/P, or Cmd-V) queues an image
+;; from the clipboard instead of pasting text; text pastes as before.
+;; C-c C-a queues any file.  Queued items appear above the prompt with
+;; the recipient's name.  C-c C-k removes the last one, C-u C-c C-k all.
+;; Type an optional caption and press RET to send everything as one
+;; message.  Metadata (location, camera data) is stripped with
+;; ImageMagick (`magick' or `convert'); HEIC is converted to JPEG; GIFs
+;; and non-image files are sent unchanged.  If an image could not be
+;; cleaned it is marked, and RET asks before sending.  If a send fails,
+;; the items and caption come back.  The clipboard is read from Emacs,
+;; then pngpaste (macOS), wl-paste (Wayland) or xclip (X11).  See
+;; `signel-max-attachment-size'.
+;;
 ;; Logging: message bodies are not logged unless
 ;; `signel-log-message-bodies' is non-nil.
 ;;
@@ -68,8 +82,10 @@
 ;; Prerequisites:
 ;; 1. signal-cli installed and in $PATH.
 ;; 2. A registered/linked Signal account.
-;; 3. For animated stickers: `imagemagick' (specifically the `convert' command)
-;;    must be available in your PATH.
+;; 3. Optional: ImageMagick (`convert', or `magick') for animated stickers
+;;    and for stripping metadata from sent images.
+;; 4. Optional: pngpaste (macOS), wl-paste (Wayland) or xclip (X11) for
+;;    pasting images from the clipboard.
 
 ;;; Code:
 
