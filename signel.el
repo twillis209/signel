@@ -992,7 +992,9 @@ Return nil if PROGRAM is not installed or exits non-zero."
   "Return the clipboard image as (TYPE . BYTES), or nil.  Never signals.
 Ask Emacs for an image/png selection when a window system is active,
 then fall back to pngpaste (macOS), wl-paste (Wayland) or xclip.  The
-bytes must sniff as an image."
+bytes must sniff as a raster image type; text formats such as SVG or
+PostScript are rejected, since on some systems a text selection is
+returned whatever target is asked for."
   (condition-case err
       (let ((check (lambda (data)
                      ;; A multibyte text selection fails `string-to-unibyte';
@@ -1001,7 +1003,8 @@ bytes must sniff as an image."
                        (when (stringp data)
                          (let* ((bytes (string-to-unibyte data))
                                 (type (signel--sniff-bytes bytes)))
-                           (and type (cons type bytes))))))))
+                           (and (memq type '(png jpeg gif webp tiff heic))
+                                (cons type bytes))))))))
         (or (and (fboundp 'gui-get-selection) window-system
                  (funcall check (ignore-errors
                                   (gui-get-selection 'CLIPBOARD 'image/png))))

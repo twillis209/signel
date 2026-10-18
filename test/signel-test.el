@@ -1581,3 +1581,22 @@ Image rendering is stubbed; `calls' records it."
           (should (= (window-point at-input) (point-max)))
           (should (= (window-point in-history) (point-min)))
           (should (= (point) (point-min))))))))
+
+;;; Final review fixes
+
+(ert-deftest signel-clipboard-svg-text-selection-pastes-text ()
+  (let ((system-type 'darwin))
+    (signel-test-with-pending
+      (signel-test-with-clipboard-tools '() "" 0
+        (let ((window-system 'ns)
+              (ran nil))
+          (cl-letf (((symbol-function 'gui-get-selection)
+                     (lambda (&rest _) signel-test--svg))
+                    ((symbol-function 'evil-paste-after)
+                     (lambda (&optional _arg) (interactive "P") (setq ran t))))
+            (should-not (signel--clipboard-image))
+            (let ((this-original-command 'evil-paste-after))
+              (call-interactively #'signel-paste))
+            (should ran)
+            (should-not signel--pending)
+            (should-not calls)))))))
