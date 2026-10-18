@@ -308,11 +308,18 @@ number."
     (insert (apply #'format fmt args))
     (insert "\n")))
 
+(defun signel--shorten-data-uri-string (string)
+  "Return STRING with each `data:' URI in it replaced by its length."
+  (replace-regexp-in-string
+   "data:[[:alnum:]+/=;,%._~!*-]+"
+   (lambda (uri) (format "data:<%d bytes>" (length uri)))
+   string t t))
+
 (defun signel--shorten-data-uris (obj)
-  "Return a copy of OBJ with each `data:' string replaced by its length."
+  "Return a copy of OBJ with each `data:' URI in its strings shortened.
+See `signel--shorten-data-uri-string'."
   (cond
-   ((and (stringp obj) (string-prefix-p "data:" obj))
-    (format "data:<%d bytes>" (length obj)))
+   ((stringp obj) (signel--shorten-data-uri-string obj))
    ((consp obj) (cons (signel--shorten-data-uris (car obj))
                       (signel--shorten-data-uris (cdr obj))))
    ((vectorp obj) (vconcat (mapcar #'signel--shorten-data-uris obj)))
@@ -609,7 +616,8 @@ Output is split into lines first; a line longer than
 (defun signel--handle-error (id error-obj)
   "Handle RPC errors for request ID using ERROR-OBJ."
   (let* ((buf-name (gethash id signel--request-buffer-map))
-         (msg (alist-get 'message error-obj)))
+         (msg (signel--shorten-data-uri-string
+               (format "%s" (alist-get 'message error-obj)))))
     (signel--log "RPC Error [%s]: %s" id msg)
     (when (and buf-name (get-buffer buf-name))
       (with-current-buffer buf-name
@@ -1427,7 +1435,9 @@ called with no arguments in the chat buffer, unless it has been killed."
      (lambda (result err)
        (let ((failures (and (not err) (signel--send-failures result))))
          (cond
-          (err (funcall update (format " (failed: %s)" (alist-get 'message err))
+          (err (funcall update
+                        (signel--shorten-data-uri-string
+                         (format " (failed: %s)" (alist-get 'message err)))
                         'signel-error-face)
                (when (and on-error (buffer-live-p buffer))
                  (with-current-buffer buffer (funcall on-error))))
@@ -1450,14 +1460,21 @@ called with no arguments in the chat buffer, unless it has been killed."
 (defun signel--restore-unsent (attachments caption)
   "Put back ATTACHMENTS and CAPTION of a message that failed to send.
 ATTACHMENTS are queued after any now pending.  CAPTION goes back in the
-input only if the input is empty; point is not moved."
+input only if the input is empty.  Point, and the point of any window
+showing the buffer, follows the caption if it was in the empty input
+and otherwise stays where it is."
   (when attachments
     (setq signel--pending (append signel--pending attachments))
     (signel--draw-pending))
   (when (and caption (= (marker-position signel--input-marker) (point-max)))
-    (save-excursion
-      (goto-char (point-max))
-      (insert caption))))
+    (let ((at-end (= (point) (point-max)))
+          (windows (seq-filter (lambda (w) (= (window-point w) (point-max)))
+                               (get-buffer-window-list nil nil t))))
+      (save-excursion
+        (goto-char (point-max))
+        (insert caption))
+      (when at-end (goto-char (point-max)))
+      (dolist (w windows) (set-window-point w (point-max))))))
 
 (defun signel--send-input ()
   "Send the input and any pending attachments to the current chat."

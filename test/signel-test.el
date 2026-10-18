@@ -1526,3 +1526,58 @@ Image rendering is stubbed; `calls' records it."
           (if bodies
               (should (string-match-p "data:<[0-9]+ bytes>" line))
             (should (string-match-p "attachments=1" line))))))))
+
+(ert-deftest signel-shorten-data-uri-string ()
+  (should (equal (signel--shorten-data-uri-string
+                  "Bad attachment data:image/png;filename=x;base64,AAAA== here")
+                 "Bad attachment data:<39 bytes> here"))
+  (should (equal (signel--shorten-data-uri-string "no uri") "no uri"))
+  ;; Idempotent.
+  (should (equal (signel--shorten-data-uri-string "data:<41 bytes>") "data:<41 bytes>")))
+
+(ert-deftest signel-send-error-message-hides-attachment-data ()
+  (let ((payload (make-string 40 ?Q))
+        (signel-log-message-bodies t))
+    (when (get-buffer "*signel-log*") (kill-buffer "*signel-log*"))
+    (signel-test--with-att-send
+      (setq signel--pending (list (signel-test--att "a.png" t)))
+      (signel-test--type-and-send "cap")
+      (puthash 1 (buffer-name) signel--request-buffer-map)
+      (signel--process-filter
+       nil (concat (json-encode
+                    `((id . 1)
+                      (error . ((code . -1)
+                                (message . ,(concat "Invalid attachment: data:image/png;filename=x;base64,"
+                                                    payload))))))
+                   "\n"))
+      (should (string-match-p "(failed: Invalid attachment: data:<[0-9]+ bytes>)" (buffer-string)))
+      (should (string-match-p "ERROR: Invalid attachment: data:<" (buffer-string)))
+      (should-not (string-match-p payload (buffer-string))))
+    (with-current-buffer "*signel-log*"
+      (should (string-match-p "RPC Error \\[1\\]: Invalid attachment: data:<" (buffer-string)))
+      (should-not (string-match-p payload (buffer-string))))))
+
+(ert-deftest signel-restore-unsent-point-in-empty-input-goes-to-end ()
+  (signel-test--with-att-send
+    (signel-test--type-and-send "old")
+    (goto-char (point-max))
+    (signel--dispatch '((id . 1) (error . ((code . -1) (message . "boom")))))
+    (should (equal (signel-test--input) "old"))
+    (should (= (point) (point-max)))))
+
+(ert-deftest signel-restore-unsent-moves-window-point-at-input ()
+  (signel-test-with-chat "+15550008"
+    (let ((chat (current-buffer)))
+      (save-window-excursion
+        (let ((at-input (split-window))
+              (in-history (split-window)))
+          (set-window-buffer at-input chat)
+          (set-window-point at-input (point-max))
+          (set-window-buffer in-history chat)
+          (set-window-point in-history (point-min))
+          (goto-char (point-min))
+          (signel--restore-unsent nil "old")
+          (should (equal (signel-test--input) "old"))
+          (should (= (window-point at-input) (point-max)))
+          (should (= (window-point in-history) (point-min)))
+          (should (= (point) (point-min))))))))
