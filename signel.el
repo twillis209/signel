@@ -1495,14 +1495,17 @@ and otherwise stays where it is."
       (when at-end (goto-char (point-max)))
       (dolist (w windows) (set-window-point w (point-max))))))
 
+(defun signel--input-caption ()
+  "Return the trimmed input text, or nil if it is empty."
+  (let ((text (string-trim (buffer-substring-no-properties
+                            signel--input-marker (point-max)))))
+    (and (not (string-empty-p text)) text)))
+
 (defun signel--send-input ()
   "Send the input and any pending attachments to the current chat."
   (interactive)
-  (let* ((text (string-trim (buffer-substring-no-properties
-                              signel--input-marker (point-max))))
-         (caption (and (not (string-empty-p text)) text))
-         (atts signel--pending))
-    (when (or caption atts)
+  (let ((atts signel--pending))
+    (when (or atts (signel--input-caption))
       ;; Check before deleting the draft, so it is not lost.
       (unless (get-process signel--process-name)
         (user-error "Signel service not running. M-x signel-start"))
@@ -1510,7 +1513,9 @@ and otherwise stays where it is."
                                                  (not (plist-get att :clean))))
                               atts))
                 (y-or-n-p "Some images still contain metadata (e.g. location). Send anyway? "))
-        (let ((params nil))
+        ;; Read the caption now: the input may have changed during `y-or-n-p'.
+        (let ((caption (signel--input-caption))
+              (params nil))
           (when atts
             (push `(attachments . ,(vconcat (mapcar #'signel--attachment-data-uri atts)))
                   params))
@@ -1522,11 +1527,14 @@ and otherwise stays where it is."
           ;; Not START and END: a message may have arrived during `y-or-n-p'.
           (let ((inhibit-read-only t))
             (delete-region signel--input-marker (point-max)))
+          ;; Unqueue only what is sent, and before sending: items may be
+          ;; queued meanwhile, and a send error may re-queue these ones.
+          (setq signel--pending
+                (cl-remove-if (lambda (att) (memq att atts)) signel--pending))
+          (signel--draw-pending)
           (signel--send-with-status
            params caption atts
-           (lambda () (signel--restore-unsent atts caption)))
-          (setq signel--pending nil)
-          (signel--draw-pending))))))
+           (lambda () (signel--restore-unsent atts caption))))))))
 
 ;;;###autoload
 (defun signel-attach-file (file-path)

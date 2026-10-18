@@ -1600,3 +1600,36 @@ Image rendering is stubbed; `calls' records it."
             (should ran)
             (should-not signel--pending)
             (should-not calls)))))))
+
+(ert-deftest signel-send-keeps-items-queued-during-confirm ()
+  (signel-test--with-att-send
+    (let ((a (signel-test--att "a.png" nil))
+          (c (signel-test--att "c.png" t)))
+      (setq signel--pending (list a))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (_) (setq signel--pending (append signel--pending (list c))) t)))
+        (signel-test--type-and-send "cap"))
+      (should (= 1 (length (alist-get 'attachments (alist-get 'params (car sent))))))
+      (should (equal signel--pending (list c))))))
+
+(ert-deftest signel-send-keeps-items-queued-during-send ()
+  (signel-test--with-att-send
+    (let ((a (signel-test--att "a.png" t))
+          (c (signel-test--att "c.png" t)))
+      (setq signel--pending (list a))
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_ s)
+                   (push (json-read-from-string s) sent)
+                   (setq signel--pending (append signel--pending (list c))))))
+        (signel-test--type-and-send "cap"))
+      (should (= 1 (length sent)))
+      (should (equal signel--pending (list c))))))
+
+(ert-deftest signel-send-caption-read-after-confirm ()
+  (signel-test--with-att-send
+    (setq signel--pending (list (signel-test--att "a.png" nil)))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_) (goto-char (point-max)) (insert " more") t)))
+      (signel-test--type-and-send "cap"))
+    (should (equal (alist-get 'message (alist-get 'params (car sent))) "cap more"))
+    (should (equal (signel-test--input) ""))))
