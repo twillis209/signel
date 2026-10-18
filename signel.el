@@ -1543,14 +1543,13 @@ and otherwise stays where it is."
           ;; Not START and END: a message may have arrived during `y-or-n-p'.
           (let ((inhibit-read-only t))
             (delete-region signel--input-marker (point-max)))
-          ;; Unqueue only what is sent, and before sending: items may be
-          ;; queued meanwhile, and a send error may re-queue these ones.
-          (setq signel--pending
-                (cl-remove-if (lambda (att) (memq att atts)) signel--pending))
-          (signel--draw-pending)
           (signel--send-with-status
            params caption atts
-           (lambda () (signel--restore-unsent atts caption))))))))
+           (lambda () (signel--restore-unsent atts caption)))
+          ;; Unqueue only what was sent: more may have been queued meanwhile.
+          (setq signel--pending
+                (cl-remove-if (lambda (att) (memq att atts)) signel--pending))
+          (signel--draw-pending))))))
 
 ;;;###autoload
 (defun signel-attach-file (file-path)
