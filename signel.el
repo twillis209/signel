@@ -1315,6 +1315,18 @@ KNOWN-P is non-nil if the sender is a known contact; see
 (defconst signel--paste-commands '(yank evil-paste-after evil-paste-before)
   "Commands `signel-paste' remaps, and runs when there is no image.")
 
+(defun signel--clipboard-file-name (ext)
+  "Return a name for a clipboard image with extension EXT.
+It is unique among the pending attachments."
+  (let* ((base (format "clipboard-%s" (format-time-string "%Y%m%d-%H%M%S")))
+         (name (concat base "." ext))
+         (n 1))
+    (while (seq-some (lambda (att) (equal (plist-get att :name) name))
+                     signel--pending)
+      (setq n (1+ n)
+            name (format "%s-%d.%s" base n ext)))
+    name))
+
 (defun signel-paste ()
   "Queue a clipboard image for this chat, or paste text as usual.
 In a chat buffer, if the clipboard holds an image (and no evil register
@@ -1334,9 +1346,9 @@ prefix arg."
           (call-interactively cmd))
       (signel--add-pending
        (signel--make-attachment
-        (format "clipboard-%s.%s" (format-time-string "%Y%m%d-%H%M%S")
-                (or (alist-get (car image) signel--image-extensions)
-                    (symbol-name (car image))))
+        (signel--clipboard-file-name
+         (or (alist-get (car image) signel--image-extensions)
+             (symbol-name (car image))))
         (cdr image)))
       (message "Image added; type a caption and press RET to send"))))
 

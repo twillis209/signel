@@ -1669,3 +1669,16 @@ Image rendering is stubbed; `calls' records it."
           (call-interactively #'signel-paste))
         (should ran)
         (should-not signel--pending)))))
+
+(ert-deftest signel-paste-same-second-gets-unique-names ()
+  (signel-test-with-pending
+    (cl-letf (((symbol-function 'signel--clipboard-image)
+               (lambda () (cons 'png signel-test--png-bytes)))
+              ((symbol-function 'format-time-string)
+               (lambda (&rest _) "20261017-120000")))
+      (let ((this-original-command 'yank))
+        (dotimes (_ 3) (call-interactively #'signel-paste))))
+    (should (equal (mapcar (lambda (a) (plist-get a :name)) signel--pending)
+                   '("clipboard-20261017-120000.png"
+                     "clipboard-20261017-120000-2.png"
+                     "clipboard-20261017-120000-3.png")))))
