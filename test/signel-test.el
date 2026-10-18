@@ -1655,3 +1655,17 @@ Image rendering is stubbed; `calls' records it."
                  (lambda (fmt &rest args) (push (apply #'format fmt args) logged))))
         (should (signel--clipboard-image))
         (should-not logged)))))
+
+(ert-deftest signel-paste-outside-chat-pastes-text ()
+  (with-temp-buffer
+    (let ((ran nil))
+      (cl-letf (((symbol-function 'signel--clipboard-image)
+                 (lambda () (cons 'png signel-test--png-bytes)))
+                ((symbol-function 'signel--add-pending)
+                 (lambda (&rest _) (error "Queued outside a chat")))
+                ((symbol-function 'yank)
+                 (lambda (&optional _arg) (interactive "P") (setq ran t))))
+        (let ((this-original-command 'yank))
+          (call-interactively #'signel-paste))
+        (should ran)
+        (should-not signel--pending)))))

@@ -1317,11 +1317,13 @@ KNOWN-P is non-nil if the sender is a known contact; see
 
 (defun signel-paste ()
   "Queue a clipboard image for this chat, or paste text as usual.
-If the clipboard holds an image (and no evil register was named), add
-it to the pending attachments without touching the buffer text.
-Otherwise run the command this one remaps, with the same prefix arg."
+In a chat buffer, if the clipboard holds an image (and no evil register
+was named), add it to the pending attachments without touching the
+buffer text.  Otherwise run the command this one remaps, with the same
+prefix arg."
   (interactive)
-  (let ((image (and (not (bound-and-true-p evil-this-register))
+  (let ((image (and signel--chat-id
+                    (not (bound-and-true-p evil-this-register))
                     (signel--clipboard-image))))
     (if (not image)
         (let ((cmd (if (memq this-original-command signel--paste-commands)
