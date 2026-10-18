@@ -1054,11 +1054,19 @@ Return the output bytes on exit status 0, else nil."
 (defun signel--clean-attachment (att)
   "Return a new attachment plist: ATT with photo metadata stripped.
 JPEG, PNG, WebP and TIFF are re-encoded through ImageMagick with
-`-auto-orient -strip'; HEIC is converted to JPEG.  Other types carry no
-EXIF container and are returned unchanged and clean.  On any failure
-return ATT with :clean nil."
+`-auto-orient -strip'; HEIC is converted to JPEG.  An unsniffed file
+named .heic or .heif is treated as HEIC, since older Emacsen cannot
+recognise it.  Other types carry no EXIF container and are returned
+unchanged and clean.  On any failure return ATT with :clean nil."
   (let* ((type (plist-get att :image-type))
          (att (copy-sequence att)))
+    (when (and (null type)
+               (member (downcase (or (file-name-extension
+                                      (or (plist-get att :name) ""))
+                                     ""))
+                       '("heic" "heif")))
+      (setq type 'heic
+            att (plist-put (plist-put att :image-type 'heic) :mime "image/heic")))
     (if (not (memq type '(jpeg png webp tiff heic)))
         (plist-put att :clean t)
       (let* ((out-type (if (eq type 'heic) 'jpeg type))

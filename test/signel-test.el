@@ -1682,3 +1682,21 @@ Image rendering is stubbed; `calls' records it."
                    '("clipboard-20261017-120000.png"
                      "clipboard-20261017-120000-2.png"
                      "clipboard-20261017-120000-3.png")))))
+
+(ert-deftest signel-clean-attachment-unsniffed-heic-by-name ()
+  (let ((orig (signel--make-attachment "IMG_1.HEIC" "not-sniffable")))
+    (should-not (plist-get orig :image-type))
+    (signel-test-with-magick signel-test--jpeg-bytes 0
+      (let ((out (signel--clean-attachment orig)))
+        (should (equal (cdr (car calls)) '("heic:-" "-auto-orient" "-strip" "jpeg:-")))
+        (should (eq (plist-get out :image-type) 'jpeg))
+        (should (equal (plist-get out :mime) "image/jpeg"))
+        (should (equal (plist-get out :name) "IMG_1.jpg"))
+        (should (plist-get out :clean))))
+    (signel-test-with-magick "garbage" 1
+      (let ((out (signel--clean-attachment (plist-put (copy-sequence orig) :name "x.heif"))))
+        (should (eq (plist-get out :image-type) 'heic))
+        (should (equal (plist-get out :mime) "image/heic"))
+        (should-not (plist-get out :clean))
+        (should (string-match-p "⚠ metadata not removed"
+                                (signel--pending-item-string out)))))))
